@@ -170,10 +170,7 @@ async def _process_pm(room, args):
 
 
 def message_cut(message, lenth):
-    result = []
-    for o in [message[x : x + lenth] for x in range(0, len(message), lenth)]:
-        result.append(o)
-    return result
+    return [message[x : x + lenth] for x in range(0, len(message), lenth)]
 
 
 def mentions(body, room):

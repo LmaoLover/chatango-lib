@@ -185,7 +185,7 @@ class Room(Connection):
         self._usercount = 0
         self._del_dict = dict()
         self._maxlen = 2700
-        self._history = deque(maxlen=self._maxlen + 300)
+        self._history = deque(maxlen=3000)
         self._bgmode = 0
         self._nomore = False
         self._connectiontime = None
@@ -422,10 +422,15 @@ class Room(Connection):
         await self._send_command("removeblock", unid, ip, name)
 
     def _add_history(self, msg):
-        if len(self._history) == 2900:
+        if len(self._history) == self.history.maxlen:
             rest = self._history.popleft()
             rest.detach()
         self._history.append(msg)
+
+    def _add_history_left(self, msg):
+        # Add older history unless full
+        if self.history.maxlen and len(self._history) < self.history.maxlen:
+            self._history.appendleft(msg)
 
     async def unban_user(self, user):
         rec = self.ban_record(user)
@@ -626,7 +631,7 @@ class Room(Connection):
         """history past messages"""
         msg = await _process(self, args)
         msg.attach(self, msg.id)
-        self._add_history(msg)
+        self._add_history_left(msg)
 
     async def _rcmd_b(self, args):  # TODO
         msg = await _process(self, args)

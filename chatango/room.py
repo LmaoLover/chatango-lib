@@ -191,6 +191,7 @@ class Room(Connection):
         self._connectiontime = None
         self.message_flags = 0
         self._announcement = [0, 0, ""]
+        self._rate_limit = 0
         self._badge = 0
 
     def __repr__(self):
@@ -231,6 +232,10 @@ class Room(Connection):
     @property
     def flags(self):
         return self._flags
+
+    @property
+    def rate_limit(self):
+        return self._rate_limit
 
     @property
     def user(self):
@@ -943,7 +948,16 @@ class Room(Connection):
             pass
 
     async def _rcmd_getratelimit(self, args):
-        pass  # print("GETRATELIMIT -> ", args)
+        self._rate_limit = int(args[0])
+        await self.handler._call_event("rate_limit", self)
+
+    async def _rcmd_ratelimitset(self, args):
+        self._rate_limit = int(args[0])
+        await self.handler._call_event("rate_limit", self)
+
+    async def _rcmd_ratelimited(self, args):
+        wait_time = int(args[0])
+        await self.handler._call_event("rate_limited", self, wait_time)
 
     async def _rcmd_msglexceeded(self, args):
         # print(f"_rcmd_msglexceeded ->", args)

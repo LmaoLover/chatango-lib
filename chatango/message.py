@@ -70,16 +70,6 @@ class RoomMessage(Message):
         self.flags = 0
         self.mentions = list()
 
-    def attach(self, room, msgid):
-        if self.id is not None:
-            self.room = room
-            self.id = msgid
-            self.room._msgs.update({id: self})
-
-    def detach(self):
-        if self.id is not None and self.id in self.room._msgs:
-            self.room._msgs.pop(self.id)
-
 
 async def _process(room, args):
     """Process message"""

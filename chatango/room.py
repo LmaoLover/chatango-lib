@@ -176,16 +176,15 @@ class Room(Connection):
         self._userdict = dict()
         self._mqueue = dict()
         self._uqueue = dict()
-        self._msgs = dict()
+        self._messages = dict()
+        self._history = deque(maxlen=3000)
         self._users = dict()
         self._unid = str()
         self._banlist = dict()
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)
         self._usercount = 0
-        self._del_dict = dict()
         self._maxlen = 2700
-        self._history = deque(maxlen=3000)
         self._bgmode = 0
         self._nomore = False
         self._connectiontime = None
@@ -216,6 +215,10 @@ class Room(Connection):
     def unbanlist(self):
         """Lista de usuarios desbaneados"""
         return list(set(x.target.name for x in self._unbanqueue))
+
+    @property
+    def messages(self):
+        return self._messages
 
     @property
     def history(self):
@@ -429,13 +432,21 @@ class Room(Connection):
     def _add_history(self, msg):
         if len(self._history) == self.history.maxlen:
             rest = self._history.popleft()
-            rest.detach()
+            self._messages.pop(rest.id)
         self._history.append(msg)
+        self._messages[msg.id] = msg
 
     def _add_history_left(self, msg):
         # Add older history unless full
         if self.history.maxlen and len(self._history) < self.history.maxlen:
             self._history.appendleft(msg)
+            self._messages[msg.id] = msg
+
+    def _remove_history(self, msgid):
+        msg = self._messages.pop(msgid, None)
+        if msg and msg in self._history:
+            self._history.remove(msg)
+        return msg
 
     async def unban_user(self, user):
         rec = self.ban_record(user)
@@ -635,23 +646,12 @@ class Room(Connection):
     async def _rcmd_i(self, args):
         """history past messages"""
         msg = await _process(self, args)
-        msg.attach(self, msg.id)
         self._add_history_left(msg)
 
     async def _rcmd_b(self, args):  # TODO
         msg = await _process(self, args)
-        if self._del_dict:
-            for message_inwait in self._del_dict:
-                if (
-                    self._del_dict[message_inwait]["m"] == msg.body
-                    and self.user == msg.user
-                ):
-                    self._del_dict[message_inwait].update({"i": msg})
         if args[5] in self._uqueue:
-            msgid = self._uqueue.pop(args[5])
-            if msg.user != self._user:
-                pass
-            msg.attach(self, msgid)
+            msg.id = self._uqueue.pop(args[5])
             self._add_history(msg)
             await self.handler._call_event("message", msg)
         else:
@@ -668,12 +668,9 @@ class Room(Connection):
         await self.handler._call_event("flood_warning")
 
     async def _rcmd_u(self, args):
-        """attachs and call event on_message"""
         if args[0] in self._mqueue:
             msg = self._mqueue.pop(args[0])
-            if msg.user != self._user:
-                pass
-            msg.attach(self, args[1])
+            msg.id = args[1]
             self._add_history(msg)
             await self.handler._call_event("message", msg)
         else:
@@ -900,28 +897,19 @@ class Room(Connection):
 
     async def _rcmd_delete(self, args):
         """Borrar un mensaje de mi vista actual"""
-        msg = self._msgs.get(args[0])
-        if msg and msg in self._history:
-            self._history.remove(msg)
-            await self.handler._call_event("message_delete", msg.user, msg)
-            msg.detach()
+        msg = self._remove_history(args[0])
+        if msg:
+            await self.handler._call_event("delete_message", msg)
         #
         if len(self._history) < 20 and not self._nomore:
             await self._send_command("get_more:20:0")
 
     async def _rcmd_deleteall(self, args):
         """Mensajes han sido borrados"""
-        user = None  # usuario borrado
-        msgs = list()  # mensajes borrados
-        for msgid in args:
-            msg = self._msgs.get(msgid)
-            if msg and msg in self._history:
-                self._history.remove(msg)
-                user = msg.user
-                msg.detach()
-                msgs.append(msg)
+        msgs_nones = [self._remove_history(msgid) for msgid in args]
+        msgs = [msg for msg in msgs_nones if msg]
         if msgs:
-            await self.handler._call_event("delete_user", user, msgs)
+            await self.handler._call_event("delete_user", msgs)
 
     # Receive banned word lists from server
     async def _rcmd_bw(self, args):

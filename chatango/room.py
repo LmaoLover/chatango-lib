@@ -168,7 +168,7 @@ class Room(Connection):
         self.reconnect = False
         self.owner: Optional[User] = None
         self._uid = gen_uid()
-        self._bwqueue = str()
+        self._banned_words = ("", "")
         self._user = None
         self._silent = False
         self._mods = dict()
@@ -528,7 +528,7 @@ class Room(Connection):
 
     async def set_banned_words(self, part="", whole=""):
         """
-        Actualiza las palabras baneadas para que coincidan con las recibidas
+        Actualiza las palabras baneadas en el servidor
         @param part: Las partes de palabras que serán baneadas (separadas por
         coma, 4 carácteres o más)
         @param whole: Las palabras completas que serán baneadas, (separadas
@@ -918,19 +918,15 @@ class Room(Connection):
         if msgs:
             await self.handler._call_event("delete_user", user, msgs)
 
-    async def _rcmd_bw(self, args):  # Palabras baneadas en el chat
-        # TODO, actualizar el registro del chat
+    # Receive banned word lists from server
+    async def _rcmd_bw(self, args):
         part, whole = "", ""
         if args:
             part = urlreq.unquote(args[0])
         if len(args) > 1:
             whole = urlreq.unquote(args[1])
-        if hasattr(self, "_bwqueue"):
-            # self._bwqueue = [self._bwqueue.split(':', 1)[0] + ',' + args[0],
-            #                  self._bwqueue.split(':', 1)[1] + ',' + args[1]]
-            # TODO agregar un callEvent
-            await self.set_banned_words(*self._bwqueue)
-        await self.handler._call_event("bannedwords_update", part, whole)
+        self._banned_words = (part, whole)
+        await self.handler._call_event("banned_words", part, whole)
 
     async def _rcmd_getannc(self, args):
         # ['3', 'pythonrpg', '5', '60', '<nE20/><f x1100F="1">hola']
@@ -957,9 +953,9 @@ class Room(Connection):
         # print(f"{self.name}_rcmd_show_fw ->", args)
         pass  # Show flood warning
 
-    async def _rcmd_ubw(self, args):  # TODO palabas desbaneadas ?)
-        self._ubw = args
-        # print(f"{self.name}_rcmd_ubw", args)
+    # Server updated banned words
+    async def _rcmd_ubw(self, args):
+        await self._send_command("getbannedwords")
 
     async def _rcmd_climited(self, args):
         # print(f"{self.name}_rcmd_climited", args)

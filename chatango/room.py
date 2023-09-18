@@ -811,7 +811,7 @@ class Room(Connection):
     async def _rcmd_groupflagsupdate(self, args):
         flags = args[0]
         self._flags = RoomFlags(int(flags))
-        await self.handler._call_event("group_flags", self._flags)
+        await self.handler._call_event("group_flags", self)
 
     async def _rcmd_blocked(self, args):  # TODO
         target = args[2] and User(args[2]) or ""
@@ -926,7 +926,7 @@ class Room(Connection):
         if len(args) > 1:
             whole = urlreq.unquote(args[1])
         self._banned_words = (part, whole)
-        await self.handler._call_event("banned_words", part, whole)
+        await self.handler._call_event("banned_words", self)
 
     async def _rcmd_getannc(self, args):
         # ['3', 'pythonrpg', '5', '60', '<nE20/><f x1100F="1">hola']

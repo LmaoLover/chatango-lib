@@ -889,8 +889,16 @@ class Room(Connection):
     async def _rcmd_proxybanned(self, args):
         await self.handler._call_event("proxy_banned")
 
+    async def _rcmd_show_fw(self, args):
+        await self.handler._call_event("show_flood_warning", self)
+
     async def _rcmd_show_tb(self, args):
-        await self.handler._call_event("show_tmp_ban", int(args[0]))
+        await self.handler._call_event("show_temp_ban", self, int(args[0]))
+
+    async def _rcmd_tb(self, args):
+        """Temporary ban sigue activo con el tiempo indicado"""
+        # print(f"{self.name}_rcmd_tb", args)
+        await self.handler._call_event("temp_ban", self, int(args[0]))
 
     async def _rcmd_miu(self, args):
         await self.handler._call_event("bg_reload", User(args[0]))
@@ -951,10 +959,6 @@ class Room(Connection):
         # print(f"_rcmd_msglexceeded ->", args)
         await self.handler._call_event("room_message_length_exceeded")
 
-    async def _rcmd_show_fw(self, args):
-        # print(f"{self.name}_rcmd_show_fw ->", args)
-        pass  # Show flood warning
-
     # Server updated banned words
     async def _rcmd_ubw(self, args):
         await self._send_command("getbannedwords")
@@ -970,11 +974,6 @@ class Room(Connection):
     async def _rcmd_nlptb(self, args):
         # print(f"{self.name}_rcmd_nlptb", args)
         pass  # Auto moderation temporary ban
-
-    async def _rcmd_tb(self, args):
-        """Temporary ban sigue activo con el tiempo indicado"""
-        # print(f"{self.name}_rcmd_tb", args)
-        await self.handler._call_event("flood_ban_repeat", int(args[0]))
 
     async def _rcmd_logoutfirst(self, args):
         # print(f"{self.name}_rcmd_logoutfirst", args)

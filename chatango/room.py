@@ -178,8 +178,6 @@ class Room(Connection):
         self._uqueue = dict()
         self._messages = dict()
         self._history = deque(maxlen=3000)
-        self._users = dict()
-        self._unid = str()
         self._banlist = dict()
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)

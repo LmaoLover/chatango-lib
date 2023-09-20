@@ -10,6 +10,8 @@ import urllib
 import logging
 from typing import Tuple
 
+from .hasher import Hasher
+
 # fmt: off
 specials = {
     'mitvcanal': 56, 'animeultimacom': 34, 'cricket365live': 21,
@@ -42,6 +44,50 @@ tsweights = [
 ]
 # fmt: on
 
+tshashes = {
+    "91e8b91e78e378682a3947488fd9316c": 90,
+    "eca6a363f0993d54a68ee8bf728a5022": 10,
+    "3cb1dd65d3d9942201d148be315e1353": 51,
+    "598d57ebdbc4be60d2c3bf7065646fb1": 86,
+    "125c2cad391f1c2af6b8dbeabbc40711": 20,
+    "5ab6580bb5752e550c7d2ad0e7107d4f": 22,
+    "bd1a9d7accc0fa8e277b81f1940b8af1": 10,
+    "35f8fb4a3a52203d74ba411d2907ec8e": 27,
+    "7a11f77f7c5d651461cc1b56cb3295f8": 27,
+    "d56fa7039b1da8ea297fa57c70dd028a": 20,
+    "1345c176737e37abf3a0f0b9c8d901ef": 90,
+    "c661ada6edbb1821396e0201e0e47725": 85,
+    "e5d6942071bb235e9fc4a5ce2dfdcef2": 86,
+    "140dde0776002a40c3a13888ac7bdb66": 87,
+    "3ca3259ee67dd2aca09cb769c52e2463": 91,
+    "8ae453bf7ebecb862af15dfff69ce321": 34,
+    "71fef04a40db4cd5a681736b8dff18ae": 27,
+    "d53fcb14ac6097b6cf3dd9d8364f23d9": 90,
+    "5e2882b7386fbb3d59667aaa34452d9a": 85,
+    "4cc2baaf65ed713e81edadd38de27af0": 91,
+    "ca4a0f825f254ac3e302e81848d977a2": 51,
+    "7a63f4590acc91c2619b87b541c3fbca": 22,
+    "471ddb2a802b14faa52e16ff80cc8231": 88,
+    "e3b4b482cb1a23475c3d71b7131cf5bf": 69,
+    "bcfc527d6c18322a1cd4daffd3022ce7": 10,
+    "636fdb8e231dd084b92a83ac43e5c2aa": 27,
+    "357125725bb8dd47034cba16d52b809d": 88,
+    "15f46d7975c1c9916daaceb8747240fc": 69,
+    "856c72b367c65b0a8b313d3d46d1bb79": 67,
+    "310dc0a3acd14f7c8047de4226956473": 22,
+    "c823c6c1178cd0bda18fb9c92af92a56": 90,
+    "fadf6f0ce3fea6c05db69c7894d1c593": 89,
+    "940401e30ccba30826f8390e99706e68": 34,
+    "7ef3a503fcc80806be880c22f2a3eb69": 20,
+    "3ec844c0ff298c660ca06324c7f05cf0": 70,
+    "5e7cc3e1526a20190cc8b3299ff011c2": 92,
+    "106e74ab50d5e68259f82331c87499ca": 56,
+    "b6b88e4bcb579d4f535a54e2382d7644": 88,
+    "a31f7787f27b227fbb7bfedf87391415": 51,
+    "9dd2b303a9b243a95e7faa6ef9e1fc9f": 54,
+    "5d27aab7be0ce5be3014b511cc3e92f1": 92,
+}
+
 
 def get_server(group):
     """
@@ -53,9 +99,11 @@ def get_server(group):
     @rtype: str
     @return: the server's hostname
     """
-    try:
-        sn = specials[group]
-    except KeyError:
+    sn = specials.get(group)
+    if not sn:
+        hash = Hasher().hash(group)
+        sn = tshashes.get(hash)
+    if not sn:
         group = group.replace("_", "q")
         group = group.replace("-", "q")
         fnv = int(group[:5], 36)

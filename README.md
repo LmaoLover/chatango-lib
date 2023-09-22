@@ -1,5 +1,5 @@
 # chatango-lib
-Chatango Library for Python 3.6+
+Chatango Library for Python 3.8+
 
 First, Special thanks to Sweets, Linkkg(Megamaster12) and [TheClonerx](https://github.com/linkkg/megach.py)
 
@@ -14,7 +14,7 @@ Any question can be [here](https://palaciodehielo.chatango.com/) *en/es*, whatev
 upd: I'm seeing the limit using just one session, thinking about making a version that sets connection per session. 2.0v 
 wait for it.
 #### Required
-1-Python 3.6+
+1-Python 3.8+
 
 2-Setuptools or pip for dependencies -> aiohttp
 

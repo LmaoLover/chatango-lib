@@ -779,6 +779,13 @@ class Room(Connection):
     async def _rcmd_mods(self, args):
         pre = self._mods
         mods = self._mods = dict()
+
+        # Last mod removed
+        if len(args) == 1 and args[0] == "":
+            (user, _) = pre.popitem()
+            await self.handler._call_event("mod_remove", self, user)
+            return
+
         # Load current mods
         for mod in args:
             name, powers = mod.split(",", 1)
@@ -790,13 +797,13 @@ class Room(Connection):
             tuser not in pre and tuser in mods
         ):
             if self.user == tuser:
-                await self.handler._call_event("mod_added", self.user)
+                await self.handler._call_event("mod_added", self, self.user)
             return
 
         for user in self.mods - set(pre.keys()):
-            await self.handler._call_event("mod_added", user)
+            await self.handler._call_event("mod_added", self, user)
         for user in set(pre.keys()) - self.mods:
-            await self.handler._call_event("mod_remove", user)
+            await self.handler._call_event("mod_remove", self, user)
         for user in set(pre.keys()) & self.mods:
             privs = set(
                 x
@@ -806,7 +813,7 @@ class Room(Connection):
             )
             privs = privs - {"MOD_ICON_VISIBLE", "value"}
             if privs:
-                await self.handler._call_event("mods_change", user, privs)
+                await self.handler._call_event("mods_change", self, user, privs)
 
     async def _rcmd_groupflagsupdate(self, args):
         flags = args[0]
@@ -882,7 +889,7 @@ class Room(Connection):
         await self.handler._call_event("room_denied", self)
 
     async def _rcmd_updatemoderr(self, args):
-        await self.handler._call_event("mod_update_error", User(args[1]), args[0])
+        await self.handler._call_event("mod_update_error", self, User(args[1]), args[0])
 
     async def _rcmd_proxybanned(self, args):
         await self.handler._call_event("proxy_banned")

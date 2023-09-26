@@ -13,9 +13,17 @@ logger = logging.getLogger(__name__)
 
 class Client(EventHandler):
     def __init__(
-        self, username: str = "", password: str = "", rooms: List[str] = [], pm=False
+        self,
+        username: str = "",
+        password: str = "",
+        rooms: List[str] = [],
+        pm=False,
+        room_class=Room,
+        pm_class=PM,
     ):
         self._tasks: List[asyncio.Task] = []
+        self._room_class = room_class
+        self._pm_class = pm_class
         self.running = False
         self.rooms: Dict[str, Room] = {}
         self.pm: Optional[PM] = None
@@ -66,10 +74,13 @@ class Client(EventHandler):
         self.add_task(self._watch_pm())
 
     async def _watch_pm(self):
-        pm = PM(self)
-        self.pm = pm
-        await pm.listen(self.username, self.password, reconnect=True)
-        self.pm = None
+        if self._pm_class is PM or issubclass(self._pm_class, PM):
+            pm = self._pm_class(self)
+            self.pm = pm
+            await pm.listen(self.username, self.password, reconnect=True)
+            self.pm = None
+        else:
+            raise TypeError("Client: custom PM class does not inherit from PM")
 
     def leave_pm(self):
         if self.pm:
@@ -93,11 +104,14 @@ class Client(EventHandler):
         self.add_task(self._watch_room(room_name))
 
     async def _watch_room(self, room_name: str):
-        room = Room(self, room_name)
-        self.rooms[room_name] = room
-        await room.listen(self.username, self.password, reconnect=True)
-        # Client level reconnect?
-        self.rooms.pop(room_name, None)
+        if self._room_class is Room or issubclass(self._room_class, Room):
+            room = self._room_class(self, room_name)
+            self.rooms[room_name] = room
+            await room.listen(self.username, self.password, reconnect=True)
+            # Client level reconnect?
+            self.rooms.pop(room_name, None)
+        else:
+            raise TypeError("Client: custom room class does not inherit from Room")
 
     def leave_room(self, room_name: str):
         room = self.get_room(room_name)

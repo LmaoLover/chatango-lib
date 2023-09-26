@@ -1,5 +1,6 @@
 import inspect
 import logging
+import asyncio
 
 
 class EventHandler:
@@ -13,13 +14,15 @@ class EventHandler:
         else:
             args_section = repr(args)
         kwargs_section = "" if not kwargs else repr(kwargs)
-        logging.getLogger(__name__).debug(f"EVENT {event} {args_section} {kwargs_section}")
+        logging.getLogger(__name__).debug(
+            f"EVENT {event} {args_section} {kwargs_section}"
+        )
 
     async def _call_event(self, event: str, *args, **kwargs):
         attr = f"on_{event}"
         await self.on_event(event, *args, **kwargs)
         if hasattr(self, attr):
-            await getattr(self, attr)(*args, **kwargs)
+            asyncio.create_task(getattr(self, attr)(*args, **kwargs))
 
     def event(self, func, name=None):
         assert inspect.iscoroutinefunction(func)

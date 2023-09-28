@@ -1,21 +1,15 @@
-import sys
 import time
 import asyncio
-import logging
-import traceback
 from typing import Optional
 
 from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
-from .handler import EventHandler
+from .handler import CommandHandler, EventHandler
 from .user import User, Friend
 from .message import _process_pm, message_cut
 
 
-logger = logging.getLogger(__name__)
-
-
-class Socket:
+class Socket(CommandHandler):
     def __init__(self, handler: EventHandler):
         self.handler = handler
         self._reset()
@@ -46,15 +40,13 @@ class Socket:
             await self._connection.wait_closed()
         self._reset()
 
-    async def _send_command(self, *args, terminator="\r\n\0"):
+    async def _send_command(self, command, terminator="\r\n\0"):
         if self._first_command:
             terminator = "\x00"
             self._first_command = False
         else:
             terminator = "\r\n\0"
-        message = ":".join(args) + terminator
-        if message != "\r\n\r\n\x00": # ping
-            logger.debug(f'OUT {":".join(args)}')
+        message = command + terminator
         if self._connection:
             self._connection.write(message.encode())
             await self._connection.drain()
@@ -69,7 +61,6 @@ class Socket:
                 if not self.connected:
                     break
                 await self._send_command("\r\n", terminator="\x00")
-                await self.handler._call_event("pm_ping", self)
         except asyncio.exceptions.CancelledError:
             pass
 
@@ -83,37 +74,15 @@ class Socket:
                 break
             if data:
                 data_str: str = data.decode()
-                if data_str == "\r\n\x00":
-                    await self._do_process("pong")
-                else:
+                if data_str != "\r\n\x00":  # pong
                     cmds = data_str.split("\r\n\x00")
                     for cmd in cmds:
-                        if cmd != "":
-                            logger.debug(f" IN {cmd}")
-                            await self._do_process(cmd)
+                        await self._receive_command(cmd)
             else:
                 await self._disconnect()
                 break
             await asyncio.sleep(0.0001)
         await self.handler._call_event("pm_disconnect", self)
-
-    async def _do_process(self, recv: str):
-        """
-        Process one command
-        """
-        if recv:
-            cmd, _, args = recv.partition(":")
-            args = args.split(":")
-        else:
-            return
-        if hasattr(self, f"_rcmd_{cmd}"):
-            try:
-                await getattr(self, f"_rcmd_{cmd}")(args)
-            except:
-                logger.error(f"Error while handling command {cmd}")
-                traceback.print_exc(file=sys.stderr)
-        else:
-            logger.error(f"Unhandled received command {cmd}")
 
 
 class PM(Socket):
@@ -175,7 +144,7 @@ class PM(Socket):
         if not self.__token:
             self.__token = await get_token(user_name, password)
         if self.__token:
-            await self._send_command("tlogin", self.__token, "2", self._uid)
+            await self.send_command("tlogin", self.__token, "2", self._uid)
             self.user = User(user_name)
 
     async def connection_wait(self):
@@ -211,13 +180,13 @@ class PM(Socket):
                 )
                 for msg in message_cut(message, self._maxlen):
                     msg = f'{nc}<m v="1"><g xs0="0"><g x{fs}s{fc}="{ff}">{msg}</g></g></m>'
-                    await self._send_command("msg", target.lower(), msg)
+                    await self.send_command("msg", target.lower(), msg)
 
     async def block(self, user):  # TODO
         if isinstance(user, User):
             user = user.name
         if user not in self._blocked:
-            await self._send_command("block", user, user, "S")
+            await self.send_command("block", user, user, "S")
             self._blocked.append(User(user))
             await self.handler._call_event("pm_block", User(user))
 
@@ -225,7 +194,7 @@ class PM(Socket):
         if isinstance(user, User):
             user = user.name
         if user in self._blocked:
-            await self._send_command("unblock", user)
+            await self.send_command("unblock", user)
             await self.handler._call_event("pm_unblock", User(user))
             return True
 
@@ -242,28 +211,25 @@ class PM(Socket):
         self._history.append(args)
 
     async def enable_bg(self):
-        await self._send_command("msgbg", "1")
+        await self.send_command("msgbg", "1")
 
     async def disable_bg(self):
-        await self._send_command("msgbg", "0")
+        await self.send_command("msgbg", "0")
 
     async def addfriend(self, user_name):
         user = user_name
         friend = self.get_friend(user)
         if not friend:
-            await self._send_command("wladd", user_name.lower())
+            await self.send_command("wladd", user_name.lower())
 
     async def unfriend(self, user_name):
         user = user_name
         friend = self.get_friend(user)
         if friend:
-            await self._send_command("wldelete", friend.name)
+            await self.send_command("wldelete", friend.name)
 
     async def _rcmd_seller_name(self, args):
         await self.handler._call_event("pm_connect", self)
-
-    async def _rcmd_pong(self, args):
-        await self.handler._call_event("pm_pong", self)
 
     async def _rcmd_premium(self, args):
         if args and args[0] == "210":
@@ -291,9 +257,9 @@ class PM(Socket):
         if self.friends or self.blocked:
             self.friends.clear()
             self.blocked.clear()
-        await self._send_command("getpremium")
-        await self._send_command("wl")
-        await self._send_command("getblock")
+        await self.send_command("getpremium")
+        await self.send_command("wl")
+        await self.send_command("getblock")
 
     async def _rcmd_toofast(self, args):
         self._silent = time.time() + 12  # seconds to wait
@@ -339,7 +305,7 @@ class PM(Socket):
                 friend._status = "app"
             friend._check_status(float(last_on), None, int(idle))
             self._friends[str(user.name)] = friend
-            await self._send_command("track", user.name)
+            await self.send_command("track", user.name)
 
     async def _rcmd_track(self, args):
         friend = self._friends[args[0]] if args[0] in self.friends else None
@@ -379,8 +345,8 @@ class PM(Socket):
             friend = Friend(User(args[0]), self)
             self._friends[args[0]] = friend
             await self.handler._call_event("pm_contact_addfriend", friend)
-            await self._send_command("wl")
-            await self._send_command("track", args[0].lower())
+            await self.send_command("wl")
+            await self.send_command("track", args[0].lower())
 
     async def _rcmd_wldelete(self, args):
         if args[1] == "deleted":

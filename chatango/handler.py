@@ -1,6 +1,10 @@
+import sys
 import inspect
 import logging
+import traceback
 import asyncio
+
+logger = logging.getLogger(__name__)
 
 
 class EventHandler:
@@ -14,9 +18,7 @@ class EventHandler:
         else:
             args_section = repr(args)
         kwargs_section = "" if not kwargs else repr(kwargs)
-        logging.getLogger(__name__).debug(
-            f"EVENT {event} {args_section} {kwargs_section}"
-        )
+        logger.debug(f"EVENT {event} {args_section} {kwargs_section}")
 
     async def _call_event(self, event: str, *args, **kwargs):
         attr = f"on_{event}"
@@ -34,11 +36,34 @@ class EventHandler:
 
 
 class CommandHandler:
-    async def on_command(self, command: str, *args, **kwargs):
-        logging.getLogger(__name__).debug(f"{command} {repr(args)} {repr(kwargs)}")
+    """
+    Internal method to send a command using the protocol of the
+    subclass (websocket, tcp, etc.)
+    """
+    async def _send_command(self, *args, **kwargs):
+        raise TypeError("CommandHandler child class must implement _send_command")
 
-    async def _call_command(self, command: str, *args, **kwargs):
-        attr = f"_rcmd_{command}"
-        await self.on_command(command, *args, **kwargs)
-        if hasattr(self, attr):
-            await getattr(self, attr)(*args, **kwargs)
+    """
+    Public send method
+    """
+    async def send_command(self, *args):
+        command = ":".join(args)
+        logger.debug(f"OUT {command}")
+        await self._send_command(command)
+
+    """
+    Receive an incoming command and dynamically call a handler
+    """
+    async def _receive_command(self, command: str):
+        if not command:
+            return
+        logger.debug(f" IN {command}")
+        action, *args = command.split(":")
+        if hasattr(self, f"_rcmd_{action}"):
+            try:
+                await getattr(self, f"_rcmd_{action}")(args)
+            except:
+                logger.error(f"Error while handling command {action}")
+                traceback.print_exc(file=sys.stderr)
+        else:
+            logger.error(f"Unhandled received command {action}")

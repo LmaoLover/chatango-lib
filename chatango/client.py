@@ -1,17 +1,16 @@
-import asyncio
 import logging
-from typing import Coroutine, Dict, List, Optional
+from typing import Dict, List, Optional
 
+from .handler import TaskHandler
 from .pm import PM
 from .room import Room
-from .handler import EventHandler
 from .utils import public_attributes
 
 
 logger = logging.getLogger(__name__)
 
 
-class Client(EventHandler):
+class Client(TaskHandler):
     def __init__(
         self,
         username: str = "",
@@ -21,7 +20,6 @@ class Client(EventHandler):
         room_class=Room,
         pm_class=PM,
     ):
-        self._tasks: List[asyncio.Task] = []
         self._room_class = room_class
         self._pm_class = pm_class
         self.running = False
@@ -35,22 +33,8 @@ class Client(EventHandler):
     def __dir__(self):
         return public_attributes(self)
 
-    def add_task(self, coro: Coroutine):
-        self._tasks.append(asyncio.create_task(coro))
-
-    def _prune_tasks(self):
-        self._tasks = [task for task in self._tasks if not task.done()]
-
-    async def _task_loop(self, forever=False):
-        while self._tasks or forever:
-            await asyncio.gather(*self._tasks)
-            self._prune_tasks()
-            if forever:
-                await asyncio.sleep(0.1)
-
     async def run(self, *, forever=False):
         self.running = True
-        await self._call_event("init")
 
         if not forever and not self.use_pm and not self.initial_rooms:
             logger.error("No rooms or PM to join. Exiting.")
@@ -62,8 +46,10 @@ class Client(EventHandler):
         for room_name in self.initial_rooms:
             self.join_room(room_name)
 
-        await self._call_event("start")
-        await self._task_loop(forever)
+        if forever:
+            await self.task_loop
+        else:
+            await self.complete_tasks()
         self.running = False
 
     def join_pm(self):
@@ -75,7 +61,8 @@ class Client(EventHandler):
 
     async def _watch_pm(self):
         if self._pm_class is PM or issubclass(self._pm_class, PM):
-            pm = self._pm_class(self)
+            pm = self._pm_class()
+            pm.add_listener(self)
             self.pm = pm
             await pm.listen(self.username, self.password, reconnect=True)
             self.pm = None
@@ -105,7 +92,8 @@ class Client(EventHandler):
 
     async def _watch_room(self, room_name: str):
         if self._room_class is Room or issubclass(self._room_class, Room):
-            room = self._room_class(self, room_name)
+            room = self._room_class(room_name)
+            room.add_listener(self)
             self.rooms[room_name] = room
             await room.listen(self.username, self.password, reconnect=True)
             # Client level reconnect?

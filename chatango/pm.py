@@ -4,15 +4,15 @@ from typing import Optional
 
 from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
-from .handler import CommandHandler, EventHandler
+from .handler import CommandHandler, EventHandler, TaskHandler
 from .user import User, Friend
 from .message import _process_pm, message_cut
 
 
 class Socket(CommandHandler):
-    def __init__(self, handler: EventHandler):
-        self.handler = handler
+    def __init__(self):
         self._reset()
+        self._ping_task = asyncio.create_task(self._do_ping())
 
     def _reset(self):
         self._connected = False
@@ -20,7 +20,6 @@ class Socket(CommandHandler):
         self._recv: Optional[asyncio.StreamReader] = None
         self._connection: Optional[asyncio.StreamWriter] = None
         self._recv_task: Optional[asyncio.Task] = None
-        self._ping_task: Optional[asyncio.Task] = None
 
     @property
     def connected(self):
@@ -30,11 +29,8 @@ class Socket(CommandHandler):
         self._recv, self._connection = await asyncio.open_connection(server, port)
         self._connected = True
         self._recv_task = asyncio.create_task(self._do_recv())
-        self._ping_task = asyncio.create_task(self._do_ping())
 
     async def _disconnect(self):
-        if self._ping_task:
-            self._ping_task.cancel()
         if self._connection:
             self._connection.close()
             await self._connection.wait_closed()
@@ -55,14 +51,10 @@ class Socket(CommandHandler):
         """
         Ping the socket every minute to keep alive
         """
-        try:
-            while True:
-                await asyncio.sleep(90)
-                if not self.connected:
-                    break
+        while True:
+            await asyncio.sleep(90)
+            if self.connected:
                 await self._send_command("\r\n", terminator="\x00")
-        except asyncio.exceptions.CancelledError:
-            pass
 
     async def _do_recv(self):
         """
@@ -70,24 +62,21 @@ class Socket(CommandHandler):
         """
         while self._recv:
             data: bytes = await self._recv.read(2048)
-            if not self.connected:
-                break
-            if data:
+            if self.connected and data:
                 data_str: str = data.decode()
                 if data_str != "\r\n\x00":  # pong
                     cmds = data_str.split("\r\n\x00")
                     for cmd in cmds:
                         await self._receive_command(cmd)
             else:
-                await self._disconnect()
                 break
             await asyncio.sleep(0.0001)
-        await self.handler._call_event("pm_disconnect", self)
+        await self._disconnect()
 
 
-class PM(Socket):
-    def __init__(self, handler: EventHandler):
-        super().__init__(handler)
+class PM(Socket, EventHandler, TaskHandler):
+    def __init__(self):
+        super().__init__()
         self.server = "c1.chatango.com"
         self.port = 443
         self.user = None
@@ -150,6 +139,7 @@ class PM(Socket):
     async def connection_wait(self):
         if self._recv_task:
             await self._recv_task
+        await self.call_event("pm_disconnect")
 
     async def disconnect(self):
         self.reconnect = False
@@ -168,7 +158,7 @@ class PM(Socket):
         if isinstance(target, User):
             target = target.name
         if self._silent > time.time():
-            await self.handler._call_event("pm_silent", message)
+            await self.call_event("pm_silent", message)
         else:
             if len(message) > 0:
                 message = message  # format_videos(self.user, message)
@@ -188,14 +178,14 @@ class PM(Socket):
         if user not in self._blocked:
             await self.send_command("block", user, user, "S")
             self._blocked.append(User(user))
-            await self.handler._call_event("pm_block", User(user))
+            await self.call_event("pm_block", User(user))
 
     async def unblock(self, user):
         if isinstance(user, User):
             user = user.name
         if user in self._blocked:
             await self.send_command("unblock", user)
-            await self.handler._call_event("pm_unblock", User(user))
+            await self.call_event("pm_unblock", User(user))
             return True
 
     def get_friend(self, user):
@@ -229,7 +219,7 @@ class PM(Socket):
             await self.send_command("wldelete", friend.name)
 
     async def _rcmd_seller_name(self, args):
-        await self.handler._call_event("pm_connect", self)
+        await self.call_event("pm_connect")
 
     async def _rcmd_premium(self, args):
         if args and args[0] == "210":
@@ -244,12 +234,12 @@ class PM(Socket):
         self._correctiontime = float(self._connectiontime) - time.time()
 
     async def _rcmd_kickingoff(self, args):
-        await self.handler._call_event("kickingoff", self, args)
+        await self.call_event("pm_kickingoff", args)
         self.__token = None
         await self._disconnect()
 
     async def _rcmd_DENIED(self, args):
-        await self.handler._call_event("pm_denied", self, args)
+        await self.call_event("pm_denied", args)
         self.__token = None
         await self._disconnect()
 
@@ -263,15 +253,15 @@ class PM(Socket):
 
     async def _rcmd_toofast(self, args):
         self._silent = time.time() + 12  # seconds to wait
-        await self.handler._call_event("pm_toofast")
+        await self.call_event("pm_toofast")
 
     async def _rcmd_msglexceeded(self, args):
-        await self.handler._call_event("pm_msglexceeded")
+        await self.call_event("pm_msglexceeded")
 
     async def _rcmd_msg(self, args):
         msg = await _process_pm(self, args)
         self._add_to_history(msg)
-        await self.handler._call_event("pm_message", msg)
+        await self.call_event("pm_message", msg)
 
     async def _rcmd_msgoff(self, args):
         msg = await _process_pm(self, args)
@@ -332,10 +322,10 @@ class PM(Socket):
             return
         status = True if args[2] == "online" else False
         friend._check_status(float(args[1]), status, 0)
-        await self.handler._call_event(f"pm_contact_{args[2]}", friend)
+        await self.call_event(f"pm_contact_{args[2]}", friend)
 
     async def _rcmd_block_list(self, args):
-        await self.handler._call_event("pm_block_list")
+        await self.call_event("pm_block_list")
 
     async def _rcmd_wladd(self, args):
         if args[1] == "invalid":
@@ -344,7 +334,7 @@ class PM(Socket):
         if not friend:
             friend = Friend(User(args[0]), self)
             self._friends[args[0]] = friend
-            await self.handler._call_event("pm_contact_addfriend", friend)
+            await self.call_event("pm_contact_addfriend", friend)
             await self.send_command("wl")
             await self.send_command("track", args[0].lower())
 
@@ -353,4 +343,4 @@ class PM(Socket):
             friend = args[0]
             if friend in self._friends:
                 del self._friends[friend]
-                await self.handler._call_event("pm_contact_unfriend", args[0])
+                await self.call_event("pm_contact_unfriend", args[0])

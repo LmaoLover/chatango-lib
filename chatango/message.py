@@ -130,7 +130,7 @@ async def _process(room, args):
         )
         msg.user._ispremium = ispremium
         if evt:
-            await room.handler._call_event("premium_change", msg.user, ispremium)
+            room.call_event("premium_change", msg.user, ispremium)
     return msg
 
 

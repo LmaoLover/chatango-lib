@@ -6,7 +6,7 @@ import time
 import datetime
 from collections import deque
 
-from .utils import Styles, make_requests, public_attributes
+from .utils import Styles, http_get, public_attributes
 
 
 class ModeratorFlags(enum.IntFlag):
@@ -155,13 +155,13 @@ class User:  # TODO a new format for users
         return self._showname
 
     @property
-    def _links(self):
-        return [
-            ["msgstyles", f"{self._ust}{self.get_user_dir}msgstyles.json"],
-            ["msgbg", f"{self._ust}{self.get_user_dir}msgbg.xml"],
-            ["mod1", f"{self._ust}{self.get_user_dir}mod1.xml"],
-            ["mod2", f"{self._ust}{self.get_user_dir}mod2.xml"],
-        ]
+    def links(self):
+        return {
+            "msgstyles": f"{self._ust}{self.get_user_dir}msgstyles.json",
+            "msgbg": f"{self._ust}{self.get_user_dir}msgbg.xml",
+            "mod1": f"{self._ust}{self.get_user_dir}mod1.xml",
+            "mod2": f"{self._ust}{self.get_user_dir}mod2.xml",
+        }
 
     @property
     def isanon(self):
@@ -204,9 +204,8 @@ class User:  # TODO a new format for users
             "br": "bottom right",
         }
         if not self.isanon:
-            tasks = await make_requests(self._links[:2])
-            msg_styles = tasks["msgstyles"].result()
-            msg_bg = tasks["msgbg"].result()
+            msg_styles = await http_get(self.links["msgstyles"])
+            msg_bg = await http_get(self.links["msgbg"])
             if msg_bg:
                 bg = msg_bg.replace('<?xml version="1.0" ?>', "")
                 bg_dict = dict(
@@ -230,8 +229,7 @@ class User:  # TODO a new format for users
 
     async def get_main_profile(self):
         if not self.isanon:
-            tasks = await make_requests(self._links[2:])
-            items = tasks.get("mod1").result()
+            items = await http_get(self.links["mod1"])
             if items is not None:
                 about = items.replace('<?xml version="1.0" ?>', "")
                 gender_start = about.find("<s>")
@@ -272,7 +270,7 @@ class User:  # TODO a new format for users
                 )
 
             try:
-                full_prof = tasks.get("mod2").result()
+                full_prof = await http_get(self.links["mod2"])
                 if full_prof is not None and str(full_prof)[:5] == "<?xml":
                     full_prof_start = full_prof.find("<body")
                     full_prof_end = full_prof.find("</body>", full_prof_start)

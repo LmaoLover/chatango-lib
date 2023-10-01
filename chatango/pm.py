@@ -139,7 +139,7 @@ class PM(Socket, EventHandler, TaskHandler):
     async def connection_wait(self):
         if self._recv_task:
             await self._recv_task
-        await self.call_event("pm_disconnect")
+        self.call_event("pm_disconnect")
 
     async def disconnect(self):
         self.reconnect = False
@@ -158,7 +158,7 @@ class PM(Socket, EventHandler, TaskHandler):
         if isinstance(target, User):
             target = target.name
         if self._silent > time.time():
-            await self.call_event("pm_silent", message)
+            self.call_event("pm_silent", message)
         else:
             if len(message) > 0:
                 message = message  # format_videos(self.user, message)
@@ -178,14 +178,14 @@ class PM(Socket, EventHandler, TaskHandler):
         if user not in self._blocked:
             await self.send_command("block", user, user, "S")
             self._blocked.append(User(user))
-            await self.call_event("pm_block", User(user))
+            self.call_event("pm_block", User(user))
 
     async def unblock(self, user):
         if isinstance(user, User):
             user = user.name
         if user in self._blocked:
             await self.send_command("unblock", user)
-            await self.call_event("pm_unblock", User(user))
+            self.call_event("pm_unblock", User(user))
             return True
 
     def get_friend(self, user):
@@ -219,7 +219,7 @@ class PM(Socket, EventHandler, TaskHandler):
             await self.send_command("wldelete", friend.name)
 
     async def _rcmd_seller_name(self, args):
-        await self.call_event("pm_connect")
+        self.call_event("pm_connect")
 
     async def _rcmd_premium(self, args):
         if args and args[0] == "210":
@@ -234,12 +234,12 @@ class PM(Socket, EventHandler, TaskHandler):
         self._correctiontime = float(self._connectiontime) - time.time()
 
     async def _rcmd_kickingoff(self, args):
-        await self.call_event("pm_kickingoff", args)
+        self.call_event("pm_kickingoff", args)
         self.__token = None
         await self._disconnect()
 
     async def _rcmd_DENIED(self, args):
-        await self.call_event("pm_denied", args)
+        self.call_event("pm_denied", args)
         self.__token = None
         await self._disconnect()
 
@@ -253,15 +253,15 @@ class PM(Socket, EventHandler, TaskHandler):
 
     async def _rcmd_toofast(self, args):
         self._silent = time.time() + 12  # seconds to wait
-        await self.call_event("pm_toofast")
+        self.call_event("pm_toofast")
 
     async def _rcmd_msglexceeded(self, args):
-        await self.call_event("pm_msglexceeded")
+        self.call_event("pm_msglexceeded")
 
     async def _rcmd_msg(self, args):
         msg = await _process_pm(self, args)
         self._add_to_history(msg)
-        await self.call_event("pm_message", msg)
+        self.call_event("pm_message", msg)
 
     async def _rcmd_msgoff(self, args):
         msg = await _process_pm(self, args)
@@ -322,10 +322,10 @@ class PM(Socket, EventHandler, TaskHandler):
             return
         status = True if args[2] == "online" else False
         friend._check_status(float(args[1]), status, 0)
-        await self.call_event(f"pm_contact_{args[2]}", friend)
+        self.call_event(f"pm_contact_{args[2]}", friend)
 
     async def _rcmd_block_list(self, args):
-        await self.call_event("pm_block_list")
+        self.call_event("pm_block_list")
 
     async def _rcmd_wladd(self, args):
         if args[1] == "invalid":
@@ -334,7 +334,7 @@ class PM(Socket, EventHandler, TaskHandler):
         if not friend:
             friend = Friend(User(args[0]), self)
             self._friends[args[0]] = friend
-            await self.call_event("pm_contact_addfriend", friend)
+            self.call_event("pm_contact_addfriend", friend)
             await self.send_command("wl")
             await self.send_command("track", args[0].lower())
 
@@ -343,4 +343,4 @@ class PM(Socket, EventHandler, TaskHandler):
             friend = args[0]
             if friend in self._friends:
                 del self._friends[friend]
-                await self.call_event("pm_contact_unfriend", args[0])
+                self.call_event("pm_contact_unfriend", args[0])

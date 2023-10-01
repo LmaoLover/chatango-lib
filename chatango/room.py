@@ -254,7 +254,7 @@ class Room(Connection, EventHandler, TaskHandler):
         """
         if self._recv_task:
             await self._recv_task
-        await self.call_event("disconnect")
+        self.call_event("disconnect")
 
     async def disconnect(self):
         """
@@ -577,7 +577,7 @@ class Room(Connection, EventHandler, TaskHandler):
                 self._mods[User(mod)].isadmin = (
                     ModeratorFlags(int(power)) & AdminFlags != 0
                 )
-        await self.call_event("connect")
+        self.call_event("connect")
 
     async def _rcmd_inited(self, args):
         await self._reload()
@@ -592,8 +592,8 @@ class Room(Connection, EventHandler, TaskHandler):
         anc = ":".join(args[2:])
         if anc != self._announcement[2]:
             self._announcement[2] = anc
-            await self.call_event("announcement_update", args[0] != "0")
-        await self.call_event("announcement", anc)
+            self.call_event("announcement_update", args[0] != "0")
+        self.call_event("announcement", anc)
 
     async def _rcmd_nomore(self, args):  # TODO
         """No more past messages"""
@@ -613,7 +613,7 @@ class Room(Connection, EventHandler, TaskHandler):
         if args[5] in self._uqueue:
             msg.id = self._uqueue.pop(args[5])
             self._add_history(msg)
-            await self.call_event("message", msg)
+            self.call_event("message", msg)
         else:
             self._mqueue[msg.id] = msg
 
@@ -629,7 +629,7 @@ class Room(Connection, EventHandler, TaskHandler):
             msg = self._mqueue.pop(args[0])
             msg.id = args[1]
             self._add_history(msg)
-            await self.call_event("message", msg)
+            self.call_event("message", msg)
         else:
             self._uqueue[args[0]] = args[1]
 
@@ -693,15 +693,15 @@ class Room(Connection, EventHandler, TaskHandler):
                     )
                     self._userhistory.append([contime, usr])
             if user.isanon:
-                await self.call_event("anon_leave", user, puid)
+                self.call_event("anon_leave", user, puid)
             else:
-                await self.call_event("leave", user, puid)
+                self.call_event("leave", user, puid)
         elif cambio == "1" or not before:  # Join
             user.addSessionId(self, ssid)
             if not user.isanon and user not in self.userlist:
-                await self.call_event("join", user, puid)
+                self.call_event("join", user, puid)
             elif user.isanon:
-                await self.call_event("anon_join", user, puid)
+                self.call_event("anon_join", user, puid)
             self._userdict[ssid] = [contime, user]
             lista = [x[1] for x in self._userhistory]
             if user in lista:
@@ -711,9 +711,9 @@ class Room(Connection, EventHandler, TaskHandler):
         else:  # TODO
             if before.isanon:  # Login
                 if user.isanon:
-                    await self.call_event("anon_login", before, user, puid)
+                    self.call_event("anon_login", before, user, puid)
                 else:
-                    await self.call_event("user_login", before, user, puid)
+                    self.call_event("user_login", before, user, puid)
             elif not before.isanon:  # Logout
                 if before in self.userlist:
                     lista = [x[1] for x in self._userhistory]
@@ -725,7 +725,7 @@ class Room(Connection, EventHandler, TaskHandler):
                         if lst:
                             self._userhistory.remove(lst[0])
                         self._userhistory.append([contime, before])
-                    await self.call_event("user_logout", before, user, puid)
+                    self.call_event("user_logout", before, user, puid)
 
             self._userdict[ssid] = [contime, user]
 
@@ -736,7 +736,7 @@ class Room(Connection, EventHandler, TaskHandler):
         # Last mod removed
         if len(args) == 1 and args[0] == "":
             (user, _) = pre.popitem()
-            await self.call_event("mod_remove", user)
+            self.call_event("mod_remove", user)
             return
 
         # Load current mods
@@ -750,13 +750,13 @@ class Room(Connection, EventHandler, TaskHandler):
             tuser not in pre and tuser in mods
         ):
             if self.user == tuser:
-                await self.call_event("mod_added", self.user)
+                self.call_event("mod_added", self.user)
             return
 
         for user in self.mods - set(pre.keys()):
-            await self.call_event("mod_added", user)
+            self.call_event("mod_added", user)
         for user in set(pre.keys()) - self.mods:
-            await self.call_event("mod_remove", user)
+            self.call_event("mod_remove", user)
         for user in set(pre.keys()) & self.mods:
             privs = set(
                 x
@@ -766,12 +766,12 @@ class Room(Connection, EventHandler, TaskHandler):
             )
             privs = privs - {"MOD_ICON_VISIBLE", "value"}
             if privs:
-                await self.call_event("mods_change", user, privs)
+                self.call_event("mods_change", user, privs)
 
     async def _rcmd_groupflagsupdate(self, args):
         flags = args[0]
         self._flags = RoomFlags(int(flags))
-        await self.call_event("group_flags")
+        self.call_event("group_flags")
 
     async def _rcmd_blocked(self, args):  # TODO
         target = args[2] and User(args[2]) or ""
@@ -779,9 +779,9 @@ class Room(Connection, EventHandler, TaskHandler):
         if not target:
             msx = [msg for msg in self._history if msg.unid == args[0]]
             target = msx and msx[0].user or User("ANON")
-            await self.call_event("anon_ban", user, target)
+            self.call_event("anon_ban", user, target)
         else:
-            await self.call_event("ban", user, target)
+            self.call_event("ban", user, target)
         self._banlist[target] = self._BANDATA(
             args[0], args[1], target, float(args[4]), user
         )
@@ -799,7 +799,7 @@ class Room(Connection, EventHandler, TaskHandler):
             self._banlist[user] = self._BANDATA(
                 params[0], params[1], user, float(params[3]), User(params[4])
             )
-        await self.call_event("banlist_update")
+        self.call_event("banlist_update")
 
     async def _rcmd_unblocked(self, args):
         """Unban event"""
@@ -813,12 +813,12 @@ class Room(Connection, EventHandler, TaskHandler):
         if target == "":
             msx = [msg for msg in self._history if msg.unid == unid]
             target = msx and msx[0].user or User("anon", isanon=True)
-            await self.call_event("anon_unban", ubsrc, target)
+            self.call_event("anon_unban", ubsrc, target)
         else:
             target = User(target)
             if target in self._banlist:
                 self._banlist.pop(target)
-            await self.call_event("unban", ubsrc, target)
+            self.call_event("unban", ubsrc, target)
 
     async def _rcmd_unblocklist(self, args):
         sections = ":".join(args).split(";")
@@ -832,40 +832,40 @@ class Room(Connection, EventHandler, TaskHandler):
             time = float(params[3])
             src = User(params[4])
             self._unbanqueue.append(self._BANDATA(unid, ip, target, time, src))
-        await self.call_event("unbanlist_update")
+        self.call_event("unbanlist_update")
 
     async def _rcmd_clearall(self, args):
-        await self.call_event("clearall", args[0])
+        self.call_event("clearall", args[0])
 
     async def _rcmd_denied(self, args):
         await self.disconnect()
-        await self.call_event("room_denied")
+        self.call_event("room_denied")
 
     async def _rcmd_updatemoderr(self, args):
-        await self.call_event("mod_update_error", User(args[1]), args[0])
+        self.call_event("mod_update_error", User(args[1]), args[0])
 
     async def _rcmd_proxybanned(self, args):
-        await self.call_event("proxy_banned")
+        self.call_event("proxy_banned")
 
     async def _rcmd_show_fw(self, args):
-        await self.call_event("show_flood_warning")
+        self.call_event("show_flood_warning")
 
     async def _rcmd_show_tb(self, args):
-        await self.call_event("show_temp_ban", int(args[0]))
+        self.call_event("show_temp_ban", int(args[0]))
 
     async def _rcmd_tb(self, args):
         """Temporary ban sigue activo con el tiempo indicado"""
         # print(f"{self.name}_rcmd_tb", args)
-        await self.call_event("temp_ban", int(args[0]))
+        self.call_event("temp_ban", int(args[0]))
 
     async def _rcmd_miu(self, args):
-        await self.call_event("bg_reload", User(args[0]))
+        self.call_event("bg_reload", User(args[0]))
 
     async def _rcmd_delete(self, args):
         """Borrar un mensaje de mi vista actual"""
         msg = self._remove_history(args[0])
         if msg:
-            await self.call_event("delete_message", msg)
+            self.call_event("delete_message", msg)
         #
         if len(self._history) < 20 and not self._nomore:
             await self.send_command("get_more:20:0")
@@ -875,7 +875,7 @@ class Room(Connection, EventHandler, TaskHandler):
         msgs_nones = [self._remove_history(msgid) for msgid in args]
         msgs = [msg for msg in msgs_nones if msg]
         if msgs:
-            await self.call_event("delete_user", msgs)
+            self.call_event("delete_user", msgs)
 
     # Receive banned word lists from server
     async def _rcmd_bw(self, args):
@@ -885,7 +885,7 @@ class Room(Connection, EventHandler, TaskHandler):
         if len(args) > 1:
             whole = urlreq.unquote(args[1])
         self._banned_words = (part, whole)
-        await self.call_event("banned_words")
+        self.call_event("banned_words")
 
     async def _rcmd_getannc(self, args):
         # ['3', 'pythonrpg', '5', '60', '<nE20/><f x1100F="1">hola']
@@ -903,19 +903,19 @@ class Room(Connection, EventHandler, TaskHandler):
 
     async def _rcmd_getratelimit(self, args):
         self._rate_limit = int(args[0])
-        await self.call_event("rate_limit")
+        self.call_event("rate_limit")
 
     async def _rcmd_ratelimitset(self, args):
         self._rate_limit = int(args[0])
-        await self.call_event("rate_limit")
+        self.call_event("rate_limit")
 
     async def _rcmd_ratelimited(self, args):
         wait_time = int(args[0])
-        await self.call_event("rate_limited", wait_time)
+        self.call_event("rate_limited", wait_time)
 
     async def _rcmd_msglexceeded(self, args):
         # print(f"_rcmd_msglexceeded ->", args)
-        await self.call_event("room_message_length_exceeded")
+        self.call_event("room_message_length_exceeded")
 
     # Server updated banned words
     async def _rcmd_ubw(self, args):
@@ -942,15 +942,15 @@ class Room(Connection, EventHandler, TaskHandler):
         name = get_anon_name(str(self._correctiontime).split(".")[0][-4:], self._puid)
         self._user = User(name, isanon=True, ip=self._currentIP)
         # TODO fail aquiCLOSE
-        await self.call_event("logout", self._user, "?")
+        self.call_event("logout", self._user, "?")
 
     async def _rcmd_updateprofile(self, args):
         """Cuando alguien actualiza su perfil en un chat"""
         user = User.get(args[0])
         user._profile = None
-        await self.call_event("profile_changes", user)
+        self.call_event("profile_changes", user)
 
     async def _rcmd_reload_profile(self, args):
         user = User.get(args[0])
         user._profile = None
-        await self.call_event("profile_reload", user)
+        self.call_event("profile_reload", user)

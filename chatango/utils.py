@@ -8,7 +8,7 @@ import asyncio
 import aiohttp
 import urllib
 import logging
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .hasher import Hasher
 
@@ -246,7 +246,9 @@ def multipart(data, files, boundary=None):
     #     return None
 
 
-async def sessionget(session: aiohttp.ClientSession, url: str):
+async def http_get(url: str, session: Optional[aiohttp.ClientSession] = None):
+    if not session:
+        session = get_aiohttp_session()
     async with session.get(url) as resp:
         assert resp.status == 200
         try:
@@ -254,15 +256,6 @@ async def sessionget(session: aiohttp.ClientSession, url: str):
             return resp
         except:
             return None
-
-
-async def make_requests(urls):
-    r = {}
-    for x in urls:
-        task = asyncio.create_task(sessionget(get_aiohttp_session(), x[1]))
-        r[x[0]] = task
-    await asyncio.gather(*r.values())
-    return r
 
 
 def gen_uid() -> str:

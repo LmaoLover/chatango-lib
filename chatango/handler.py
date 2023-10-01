@@ -142,9 +142,9 @@ class EventHandler:
     and any listening objects.
     """
 
-    async def call_event(self, event: str, *args, **kwargs):
+    def call_event(self, event: str, *args, **kwargs):
         attr = f"on_{event}"
-        await self._log_event(event, *args, **kwargs)
+        self._log_event(event, *args, **kwargs)
         # Call the event handler on self
         if hasattr(self, attr):
             asyncio.create_task(getattr(self, attr)(*args, **kwargs))
@@ -158,7 +158,7 @@ class EventHandler:
     Debug log all events
     """
 
-    async def _log_event(self, event: str, *args, **kwargs):
+    def _log_event(self, event: str, *args, **kwargs):
         if len(args) == 0:
             args_section = ""
         elif len(args) == 1:

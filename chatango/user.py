@@ -6,7 +6,7 @@ import time
 import datetime
 from collections import deque
 
-from .utils import Styles, http_get, public_attributes
+from .utils import http_get, public_attributes
 
 
 class ModeratorFlags(enum.IntFlag):
@@ -281,6 +281,98 @@ class User:
                     self._styles._profile["full"] = full_prof_body
             except (AttributeError, KeyError):
                 pass
+
+
+class Styles:
+    def __init__(
+        self,
+        name_color=None,
+        font_color=None,
+        font_face=None,
+        font_size=None,
+        use_background=None,
+    ):
+        self._name_color = name_color if name_color else str("000000")
+        self._font_color = font_color if font_color else str("000000")
+        self._font_size = font_size if font_size else 11
+        self._font_face = font_face if font_face else 0
+        self._use_background = int(use_background) if use_background else 0
+
+        self._blend_name = None
+        self._bgstyle = {
+            "align": "",
+            "bgc": "",
+            "bgalp": "",
+            "hasrec": "0",
+            "ialp": "",
+            "isvid": "0",
+            "tile": "0",
+            "useimg": "0",
+        }
+        self._profile = dict(
+            about=dict(age="", last_change="", gender="?", location="", d="", body=""),
+            full=dict(),
+        )
+
+    def __dir__(self):
+        return public_attributes(self)
+
+    def __repr__(self):
+        return f"nc:{self.name_color} |bg:{self.use_background} |{self.default}"
+
+    @property
+    def aboutme(self):
+        return self._profile["about"]
+
+    @property
+    def fullhtml(self):
+        o = html.escape(urllib.parse.unquote(self._profile["full"] or "")).replace(
+            "\r\n", "\n"
+        )
+        if o:
+            return o
+        else:
+            return None
+
+    @property
+    def fullmini(self):
+        o = html.escape(
+            urllib.parse.unquote(self._profile["about"]["body"] or "")
+        ).replace("\r\n", "\n")
+        if o:
+            return o
+        else:
+            return None
+
+    @property
+    def bgstyle(self):
+        return self._bgstyle
+
+    @property
+    def use_background(self):
+        return self._use_background
+
+    @property
+    def default(self):
+        size = str(self.font_size)
+        face = str(self.font_face)
+        return f"<f x{size}{self.font_color}='{face}'>"
+
+    @property
+    def name_color(self):
+        return self._name_color
+
+    @property
+    def font_color(self):
+        return self._font_color
+
+    @property
+    def font_size(self):
+        return self._font_size
+
+    @property
+    def font_face(self):
+        return self._font_face
 
 
 class Friend:

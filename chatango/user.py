@@ -40,44 +40,47 @@ AdminFlags = (
 )
 
 
-class User:  # TODO a new format for users
+class User:
     _users = {}
 
     def __new__(cls, name, **kwargs):
         key = name.lower()
-        if key in cls._users:
-            for attr, val in kwargs.items():
-                if attr == "ip" and not val:
-                    continue  # only valid ips
-                setattr(cls._users[key], "_" + attr, val)
-            return cls._users[key]
-        self = super().__new__(cls)
-        self._styles = Styles()
-        cls._users[key] = self
-        self._name = name.lower()
-        self._ip = None
-        self._flags = 0
-        self._history = deque(maxlen=5)
-        self._isanon = False
-        self._sids = dict()
-        self._showname = name
-        self._ispremium = None
-        self._puid = str()
-        self._client = None
-        self._last_time = None
-        for attr, val in kwargs.items():
-            setattr(self, "_" + attr, val)
-        return self
+        if key in User._users:
+            user = User._users[key]
+        else:
+            user = super().__new__(cls)
+            setattr(user, "__new_obj", True)
+            User._users[key] = user
+        return user
 
-    @classmethod
-    def get(cls, name):
-        return cls._users.get(name) or User(name)
+    def __init__(self, name, **kwargs):
+        if hasattr(self, "__new_obj"):
+            self._styles = Styles()
+            self._name = name.lower()
+            self._ip = None
+            self._flags = 0
+            self._history = deque(maxlen=5)
+            self._isanon = False
+            self._sids = dict()
+            self._showname = name
+            self._ispremium = None
+            self._puid = str()
+            self._client = None
+            self._last_time = None
+            delattr(self, "__new_obj")
+
+        for attr, val in kwargs.items():
+            if attr == "ip" and not val:
+                continue  # only valid ips
+            setattr(self, "_" + attr, val)
 
     def __dir__(self):
         return public_attributes(self)
 
     def __repr__(self):
-        return "<User: %s>" % self.showname
+        return "<User name:{} puid:{} ip:{}>".format(
+            self.showname, self._puid, self._ip
+        )
 
     @property
     def age(self):
@@ -137,10 +140,6 @@ class User:  # TODO a new format for users
     @property
     def name(self):
         return self._name
-
-    @property
-    def blend_name(self):
-        return self._blend_name
 
     @property
     def puid(self):
@@ -285,8 +284,6 @@ class User:  # TODO a new format for users
 
 
 class Friend:
-    _FRIENDS = dict()
-
     def __init__(self, user: User, client: Optional[Any] = None):
         self.user = user
         self.name = user.name
@@ -304,16 +301,8 @@ class Friend:
     def __str__(self):
         return self.name
 
-    @classmethod
-    def get(cls, name):
-        return cls._FRIENDS.get(name) or Friend(name)
-
     def __dir__(self):
-        return [
-            x
-            for x in set(list(self.__dict__.keys()) + list(dir(type(self))))
-            if x[0] != "_"
-        ]
+        return public_attributes(self)
 
     @property
     def showname(self):

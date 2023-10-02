@@ -742,7 +742,7 @@ class Room(Connection, EventHandler, TaskHandler):
         # Load current mods
         for mod in args:
             name, powers = mod.split(",", 1)
-            utmp = User.get(name)
+            utmp = User(name)
             self._mods[utmp] = ModeratorFlags(int(powers))
             self._mods[utmp].isadmin = ModeratorFlags(int(powers)) & AdminFlags != 0
         tuser = User(self._currentname)
@@ -855,7 +855,6 @@ class Room(Connection, EventHandler, TaskHandler):
 
     async def _rcmd_tb(self, args):
         """Temporary ban sigue activo con el tiempo indicado"""
-        # print(f"{self.name}_rcmd_tb", args)
         self.call_event("temp_ban", int(args[0]))
 
     async def _rcmd_miu(self, args):
@@ -914,7 +913,6 @@ class Room(Connection, EventHandler, TaskHandler):
         self.call_event("rate_limited", wait_time)
 
     async def _rcmd_msglexceeded(self, args):
-        # print(f"_rcmd_msglexceeded ->", args)
         self.call_event("room_message_length_exceeded")
 
     # Server updated banned words
@@ -922,19 +920,15 @@ class Room(Connection, EventHandler, TaskHandler):
         await self.send_command("getbannedwords")
 
     async def _rcmd_climited(self, args):
-        # print(f"{self.name}_rcmd_climited", args)
         pass  # Climited
 
     async def _rcmd_show_nlp(self, args):
-        # print(f"{self.name}_rcmd_show_nlp", args)
         pass  # Auto moderation
 
     async def _rcmd_nlptb(self, args):
-        # print(f"{self.name}_rcmd_nlptb", args)
         pass  # Auto moderation temporary ban
 
     async def _rcmd_logoutfirst(self, args):
-        # print(f"{self.name}_rcmd_logoutfirst", args)
         pass
 
     async def _rcmd_logoutok(self, args, Force=False):
@@ -946,11 +940,11 @@ class Room(Connection, EventHandler, TaskHandler):
 
     async def _rcmd_updateprofile(self, args):
         """Cuando alguien actualiza su perfil en un chat"""
-        user = User.get(args[0])
+        user = User(args[0])
         user._profile = None
         self.call_event("profile_changes", user)
 
     async def _rcmd_reload_profile(self, args):
-        user = User.get(args[0])
+        user = User(args[0])
         user._profile = None
         self.call_event("profile_reload", user)

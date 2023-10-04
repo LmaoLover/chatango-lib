@@ -55,13 +55,13 @@ class RoomFlags(enum.IntFlag):
 class Connection(CommandHandler):
     def __init__(self):
         self._reset()
-        self._ping_task = asyncio.create_task(self._do_ping())
 
     def _reset(self):
         self._connected = False
         self._first_command = True
         self._connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self._recv_task: Optional[asyncio.Task] = None
+        self._ping_task: Optional[asyncio.Task] = None
 
     @property
     def connected(self):
@@ -74,11 +74,14 @@ class Connection(CommandHandler):
             )
             self._connected = True
             self._recv_task = asyncio.create_task(self._do_recv())
+            self._ping_task = asyncio.create_task(self._do_ping())
         except aiohttp.ClientError as e:
             await self._disconnect()
             logging.getLogger(__name__).error(f"Could not connect to {server}: {e}")
 
     async def _disconnect(self):
+        if self._ping_task:
+            self._ping_task.cancel()
         if self._connection:
             await self._connection.close()
         self._reset()
@@ -282,6 +285,7 @@ class Room(Connection, EventHandler, TaskHandler):
             if not self.reconnect:
                 break
             await asyncio.sleep(3)
+        self.end_tasks()
 
     async def _auth(self, user_name: str = "", password: str = ""):
         """
@@ -659,6 +663,7 @@ class Room(Connection, EventHandler, TaskHandler):
                 user.setName(name)
             user.addSessionId(self, ssid)
             self._userdict[ssid] = [contime, user]
+        self.call_event("participants")
 
     async def _rcmd_participant(self, args):
         cambio = args[0]  # Leave Join Change

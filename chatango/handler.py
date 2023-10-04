@@ -72,6 +72,14 @@ class TaskHandler:
             task.cancel()
 
     """
+    Cancel all tasks including the task loop
+    """
+
+    def end_tasks(self):
+        self.cancel_tasks()
+        self.task_loop.cancel()
+
+    """
     Remove all done tasks, and log any exceptions if present
     """
 
@@ -90,7 +98,7 @@ class TaskHandler:
     async def tasks_forever(self):
         while True:
             self._prune_tasks()
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
 
     """
     Loop to watch tasks and exit when all are completed
@@ -114,7 +122,9 @@ passed as the first parameter to the callback.
    room.call_event("message", msg_obj)
  Callbacks:
    room.on_message(msg_obj)
+   room.on_event("message", msg_obj)
    listener.on_message(room, msg_obj)
+   listener.on_event(room, "message", msg_obj)
 
 """
 
@@ -145,12 +155,19 @@ class EventHandler:
     def call_event(self, event: str, *args, **kwargs):
         attr = f"on_{event}"
         self._log_event(event, *args, **kwargs)
+        # Call a generic event handler for all events
+        if hasattr(self, "on_event"):
+            asyncio.create_task(getattr(self, "on_event")(event, *args, **kwargs))
         # Call the event handler on self
         if hasattr(self, attr):
             asyncio.create_task(getattr(self, attr)(*args, **kwargs))
-        # Call the handler on any listeners, passing self as first arg
+        # Call the same handlers on any listeners, passing self as first arg
         if self.listeners and isinstance(self.listeners, Iterable):
             for listener in self.listeners:
+                if hasattr(listener, "on_event"):
+                    asyncio.create_task(
+                        getattr(listener, "on_event")(self, event, *args, **kwargs)
+                    )
                 if hasattr(listener, attr):
                     asyncio.create_task(getattr(listener, attr)(self, *args, **kwargs))
 

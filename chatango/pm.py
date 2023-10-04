@@ -12,7 +12,6 @@ from .message import _process_pm, message_cut
 class Socket(CommandHandler):
     def __init__(self):
         self._reset()
-        self._ping_task = asyncio.create_task(self._do_ping())
 
     def _reset(self):
         self._connected = False
@@ -20,6 +19,7 @@ class Socket(CommandHandler):
         self._recv: Optional[asyncio.StreamReader] = None
         self._connection: Optional[asyncio.StreamWriter] = None
         self._recv_task: Optional[asyncio.Task] = None
+        self._ping_task: Optional[asyncio.Task] = None
 
     @property
     def connected(self):
@@ -29,8 +29,11 @@ class Socket(CommandHandler):
         self._recv, self._connection = await asyncio.open_connection(server, port)
         self._connected = True
         self._recv_task = asyncio.create_task(self._do_recv())
+        self._ping_task = asyncio.create_task(self._do_ping())
 
     async def _disconnect(self):
+        if self._ping_task:
+            self._ping_task.cancel()
         if self._connection:
             self._connection.close()
             await self._connection.wait_closed()
@@ -153,6 +156,8 @@ class PM(Socket, EventHandler, TaskHandler):
             if not self.reconnect:
                 break
             await asyncio.sleep(3)
+        await self.complete_tasks()
+        self.end_tasks()
 
     async def send_message(self, target, message: str, use_html: bool = False):
         if isinstance(target, User):

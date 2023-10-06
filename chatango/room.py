@@ -149,7 +149,7 @@ class Room(Connection, EventHandler, TaskHandler):
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)
         self._usercount = 0
-        self._maxlen = 2700
+        self._maxlen = 2800
         self._bgmode = 0
         self._nomore = False
         self._connectiontime = None

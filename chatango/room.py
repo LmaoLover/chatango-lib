@@ -121,7 +121,7 @@ class Connection(CommandHandler):
         await self._disconnect()
 
 
-class Room(Connection, EventHandler, TaskHandler):
+class Room(Connection, EventHandler):
     _BANDATA = namedtuple("BanData", ["unid", "ip", "target", "time", "src"])
 
     def __dir__(self):

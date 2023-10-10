@@ -77,7 +77,7 @@ class Socket(CommandHandler):
         await self._disconnect()
 
 
-class PM(Socket, EventHandler, TaskHandler):
+class PM(Socket, EventHandler):
     def __init__(self):
         super().__init__()
         self.server = "c1.chatango.com"

@@ -1,7 +1,7 @@
 import sys
+import asyncio
 import logging
 import traceback
-import asyncio
 from collections.abc import Iterable
 from typing import Coroutine
 
@@ -87,9 +87,16 @@ class TaskHandler:
         for task in self.tasks:
             if task.done():
                 if task.exception():
-                    logger.error(f"Error during task")
-                    traceback.print_exception(task.exception(), file=sys.stderr)
+                    self._on_task_exception(task)
                 self.tasks.remove(task)
+
+    """
+    Callback for custom behavior on task errors
+    """
+
+    def _on_task_exception(self, task: asyncio.Task):
+        logger.error(f"Exception in task: {repr(task.get_coro())}")
+        traceback.print_exception(task.exception(), file=sys.stderr)
 
     """
     Infinite loop to keep task maintenance for the life of object
@@ -164,12 +171,16 @@ class EventHandler(TaskHandler):
         # Call the same handlers on any listeners, passing self as first arg
         if self.listeners and isinstance(self.listeners, Iterable):
             for listener in self.listeners:
+                if isinstance(listener, TaskHandler):
+                    target = listener
+                else:
+                    target = self
                 if hasattr(listener, "on_event"):
-                    self.add_task(
+                    target.add_task(
                         getattr(listener, "on_event")(self, event, *args, **kwargs)
                     )
                 if hasattr(listener, attr):
-                    self.add_task(getattr(listener, attr)(self, *args, **kwargs))
+                    target.add_task(getattr(listener, attr)(self, *args, **kwargs))
 
     """
     Debug log all events

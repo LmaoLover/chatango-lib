@@ -88,15 +88,24 @@ class TaskHandler:
             if task.done():
                 if task.exception():
                     self._on_task_exception(task)
+                    # Run as a one-off task in case it throws an exception itself
+                    asyncio.create_task(self.on_task_exception(task))
                 self.tasks.remove(task)
+
+    """
+    Default behavior when a task results in an exception
+    """
+
+    def _on_task_exception(self, task: asyncio.Task):
+        logger.error(f"Exception in task: {repr(task.get_coro())}")
+        task.print_stack(file=sys.stderr)
 
     """
     Callback for custom behavior on task errors
     """
 
-    def _on_task_exception(self, task: asyncio.Task):
-        logger.error(f"Exception in task: {repr(task.get_coro())}")
-        traceback.print_exception(task.exception(), file=sys.stderr)
+    async def on_task_exception(self, task: asyncio.Task):
+        pass
 
     """
     Infinite loop to keep task maintenance for the life of object
@@ -246,8 +255,8 @@ class CommandHandler:
         if hasattr(self, f"_rcmd_{action}"):
             try:
                 await getattr(self, f"_rcmd_{action}")(args)
-            except:
+            except Exception as e:
                 logger.error(f"Error while handling command {action}")
-                traceback.print_exc(file=sys.stderr)
+                traceback.print_exception(e, file=sys.stderr)
         else:
             logger.error(f"Unhandled received command {action}")

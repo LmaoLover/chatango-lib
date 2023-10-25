@@ -65,20 +65,11 @@ You can run slow CPU heavy calculations in a separate python `Process` if necess
 
 A common pattern similar to older libraries like `ch.py` is to create a custom `Client` class to connect and handle events from multiple rooms.
 
-```
-```
+See `example.py`.
 
 ### Custom Room
 
 You may also use a custom `Room` class to handle events.  This also allows your application to add custom attribute to `Room`.
 
-```
-```
-
-If you are only connecting to one room, or want to manage rooms yourself without a `Client`, you may:
-
-```
-```
-
-
+If you are only connecting to one room, or want to manage rooms yourself without a `Client`, you may do so using a custom `Room` subclass.
 

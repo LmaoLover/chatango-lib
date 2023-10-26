@@ -95,7 +95,7 @@ class Hasher:
         t = andd(a + xor(d, andd(b, xor(c, d))) + tmp[0] + 3614090360, FFFFVAL)
         a = b + ((left(t, 7)) & FFFFVAL | right(t, 25))
         t = andd(d + xor(c, andd(a, xor(b, c))) + tmp[1] + 3905402710, FFFFVAL)
-        d = a + (left(t, 12) & FFFFVAL | t >> 20)
+        d = a + (left(t, 12) & FFFFVAL | right(t, 20))
         t = andd(c + xor(b, andd(d, xor(a, b))) + tmp[2] + 606105819, FFFFVAL)
         c = d + ((left(t, 17)) & FFFFVAL | right(t, 15))
         t = andd(b + xor(a, andd(c, xor(d, a))) + tmp[3] + 3250441966, FFFFVAL)

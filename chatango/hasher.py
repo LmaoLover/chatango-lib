@@ -20,12 +20,6 @@ def left(a, b):
     return m.value
 
 
-def rightr(a, b):
-    m = ctypes.c_int32(a)
-    m.value >>= b
-    return m.value
-
-
 def right(val, n):
     max_shift = 31
     n = n % max_shift

@@ -6,7 +6,7 @@ Chatango bot library using Python 3.8 and asyncio
 
 Credit to the original authors: [neokuze](https://github.com/neokuze/chatango-lib) and [TheClonerx](https://github.com/TheClonerx)
 
-Other important projects: [ch.py](https://github.com/nhammond129/ch.py), [megach](https://github.com/linkkg/megach), [CherryBlossom](https://github.com/sweets/Cherry-Blossom)
+Other important projects: [ch.py](https://github.com/nhammond129/ch.py), [megach](https://github.com/linkkg/megach), [Cherry-Blossom](https://github.com/sweets/Cherry-Blossom)
 
 ## Installation
 
@@ -37,11 +37,11 @@ The main classes you will use from the `chatango` module are `Client`, `Room`, `
 
 The major difference from older libraries like `ch.py` is the use of `asyncio`. `async` functions must either be `await`ed which cause the awaiting function to pause until the operation completes, or made into a task which runs in parallel to the current control flow.
 
-`Client` and `Room` provide some light task handlers for convenience.  Within your custom subclasses you can use `self.add_task(...)` instead of `asyncio.create_task(...)`.  This will give some basic exception handling, plus custom error behavior via `self.on_task_exception(task)`.
+`Client` and `Room` provide some light task handlers for convenience.  Within your custom subclasses you can use `self.add_task(...)` instead of `asyncio.create_task(...)`.  This provides some basic exception reporting, plus custom error handling via `self.on_task_exception(task)`.
 
 ### Events
 
-All generated events are async coroutines ran as tasks on the Room or Client which defined them.
+All generated events are async coroutines ran as tasks on the `Room` or `Client` which defined them.
 
 ### Limitations of `asyncio`
 
@@ -69,7 +69,7 @@ See `example.py`.
 
 ### Custom Room
 
-You may also use a custom `Room` class to handle events.  This also allows your application to add custom attribute to `Room`.
+You may create a custom `Room` subclass to handle events.  This also allows your application to add custom attributes to `Room`.
 
 If you are only connecting to one room, or want to manage rooms yourself without a `Client`, you may do so using a custom `Room` subclass.
 

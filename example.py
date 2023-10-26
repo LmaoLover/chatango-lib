@@ -20,10 +20,10 @@ class MyBot(chatango.Client):
     async def on_disconnect(self, room):
         print("[info] Disconnected from {}".format(repr(room)))
 
-    async def on_message(self, message):
+    async def on_message(self, room, message):
         print(
             time.strftime("%b/%d-%H:%M:%S", time.localtime(message.time)),
-            message.room.name,
+            room.name,
             message.user.showname,
             ascii(message.body)[1:-1],
         )

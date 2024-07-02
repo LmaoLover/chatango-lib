@@ -231,7 +231,7 @@ class CommandHandler:
     subclass (websocket, tcp, etc.)
     """
 
-    async def _send_command(self, *args, **kwargs):
+    async def _send_command(self, *args, **kwargs) -> None:
         raise TypeError("CommandHandler child class must implement _send_command")
 
     """

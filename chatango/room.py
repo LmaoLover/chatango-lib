@@ -21,7 +21,7 @@ from .utils import (
 from .message import Message, MessageFlags, _process, message_cut
 from .user import User, ModeratorFlags, AdminFlags
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
-from .handler import CommandHandler, EventHandler, TaskHandler
+from .handler import CommandHandler, EventHandler
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,10 @@ class Connection(CommandHandler):
 
     async def _do_recv(self):
         while self._connection:
-            message = await self._connection.receive()
+            try:
+                message = await self._connection.receive()
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                break
             if not self.connected:
                 break
             if message.type == aiohttp.WSMsgType.TEXT:
@@ -303,7 +306,7 @@ class Room(Connection, EventHandler):
     async def _logout(self):
         await self.send_command("blogout")
 
-    async def send_message(self, message, use_html=False, flags=None):
+    async def send_message(self, message, *, use_html=False, flags=None, **kwargs):
         if not self.silent:
             message_flags = (
                 flags if flags else self.message_flags + self.badge or 0 + self.badge

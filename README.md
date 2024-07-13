@@ -4,9 +4,7 @@ Chatango bot library using Python 3.8 and asyncio
 
 ### Acknowledgements
 
-Credit to the original authors: [neokuze](https://github.com/neokuze/chatango-lib) and [TheClonerx](https://github.com/TheClonerx)
-
-Other important projects: [ch.py](https://github.com/nhammond129/ch.py), [megach](https://github.com/linkkg/megach), [Cherry-Blossom](https://github.com/sweets/Cherry-Blossom)
+Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze/chatango-lib) by authors: [neokuze](https://github.com/neokuze/chatango-lib) and [TheClonerx](https://github.com/TheClonerx)
 
 ## Installation
 
@@ -14,11 +12,6 @@ Other important projects: [ch.py](https://github.com/nhammond129/ch.py), [megach
 
  - `python` 3.8+
  - `pip`
-
-### Package
-```
-pip install chatango-lib
-```
 
 ### From Source
 ```

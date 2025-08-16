@@ -1,5 +1,6 @@
 import aiohttp
 import asyncio
+import socket
 import html
 import time
 import enum
@@ -58,70 +59,199 @@ class Connection(CommandHandler):
 
     def _reset(self):
         self._connected = False
-        self._first_command = True
         self._connection: Optional[aiohttp.ClientWebSocketResponse] = None
         self._recv_task: Optional[asyncio.Task] = None
         self._ping_task: Optional[asyncio.Task] = None
 
     @property
     def connected(self):
-        return self._connected
+        return (
+            self._connected
+            and self._connection is not None
+            and not self._connection.closed
+        )
 
     async def _connect(self, server: str):
         try:
             self._connection = await get_aiohttp_session().ws_connect(
-                f"ws://{server}:8080/", origin="http://st.chatango.com"
+                f"wss://{server}:8081/", origin="http://st.chatango.com"
             )
             self._connected = True
             self._recv_task = asyncio.create_task(self._do_recv())
             self._ping_task = asyncio.create_task(self._do_ping())
+
+        except (ValueError, TypeError, aiohttp.InvalidURL) as e:
+            await self._disconnect()
+            logger.critical(f"Invalid configuration for {server}: {e}")
+            raise  # Configuration error - needs code fix
+
+        except (aiohttp.ClientConnectorSSLError, aiohttp.ClientSSLError) as e:
+            await self._disconnect()
+            logger.critical(f"SSL configuration error for {server}: {e}")
+            raise  # SSL config error - needs manual fix
+
+        except aiohttp.WSServerHandshakeError as e:
+            await self._disconnect()
+            # Even handshake errors can be temporary - server restarts, etc.
+            # Only crash if it's clearly a configuration issue
+            error_str = str(e).lower()
+            if (
+                "404" in error_str and "websocket" in error_str
+            ) or "upgrade required" in error_str:
+                # Clear WebSocket configuration errors
+                logger.error(f"WebSocket configuration error for {server}: {e}")
+                raise
+            else:
+                logger.warning(f"WebSocket handshake failed for {server}: {e}")
+                return
+
+        except aiohttp.ClientResponseError as e:
+            await self._disconnect()
+            # Even 4xx errors can be temporary with misbehaving servers
+            # Only crash on specific cases that are definitely configuration issues
+            if e.status == 404 and "websocket" in str(e).lower():
+                # 404 specifically mentioning websocket endpoint - likely wrong URL
+                logger.error(f"WebSocket endpoint not found for {server}: {e.message}")
+                raise
+            else:
+                # All other HTTP errors (including 401, 403, 500, etc.)
+                logger.warning(f"HTTP error {e.status} for {server}: {e.message}")
+                return
+
+        except socket.gaierror as e:
+            await self._disconnect()
+            # DNS errors - retry most of them since DNS can be flaky
+            if (
+                e.errno == socket.EAI_NONAME
+                and not server.replace(".", "").replace("-", "").isalnum()
+            ):
+                # Hostname contains invalid characters - definitely bad config
+                logger.error(f"Invalid hostname {server}: {e}")
+                raise
+            else:
+                # DNS resolution issue - could be temporary
+                logger.warning(f"DNS resolution failed for {server}: {e}")
+                return
+
+        except (
+            ConnectionResetError,
+            ConnectionRefusedError,
+            ConnectionAbortedError,
+            aiohttp.ServerDisconnectedError,
+            aiohttp.ServerTimeoutError,
+            asyncio.TimeoutError,
+            aiohttp.ClientPayloadError,
+        ) as e:
+            await self._disconnect()
+            logger.warning(f"Temporary connection failure for {server}: {e}")
+
+        except aiohttp.ClientConnectorError as e:
+            await self._disconnect()
+            # ClientConnectorError can be either permanent or temporary
+            error_str = str(e).lower()
+            if any(
+                keyword in error_str
+                for keyword in [
+                    "name or service not known",
+                    "nodename nor servname provided",
+                    "no address associated with hostname",
+                ]
+            ):
+                # DNS resolution failure
+                logger.error(f"Invalid hostname {server}: {e}")
+                raise
+            else:
+                logger.warning(f"Network connectivity issue for {server}: {e}")
+                return
+
         except aiohttp.ClientError as e:
             await self._disconnect()
-            logging.getLogger(__name__).error(f"Could not connect to {server}: {e}")
+            # Catch remaining ClientError subclasses as temporary
+            logger.warning(f"Client error for {server}: {e}")
+            return
+
+        except Exception as e:
+            await self._disconnect()
+            logger.warning(f"Unexpected error connecting to {server}: {e}")
+            return
 
     async def _disconnect(self):
+        if not self._connected:
+            return
+
+        self._connected = False
+
         if self._ping_task:
             self._ping_task.cancel()
+            try:
+                await self._ping_task
+            except asyncio.CancelledError:
+                pass
+        if self._recv_task:
+            self._recv_task.cancel()
+            try:
+                await self._recv_task
+            except asyncio.CancelledError:
+                pass
+
         if self._connection:
-            await self._connection.close()
+            try:
+                await self._connection.close()
+            except Exception:
+                pass
+
         self._reset()
 
-    async def _send_command(self, command, terminator="\r\n\0"):
+    async def _send_command(self, command: str, terminator: str = "\r\n\0"):
+        if not self.connected:
+            logger.error(f'Message send failed "{command}": Not connected')
+            return
+
         message = command + terminator
-        if self._connection:
+        try:
             await self._connection.send_str(message)
+        except Exception as e:
+            logger.error(f'Message send failed "{command}": {e}')
 
     async def _do_ping(self):
         """
         Ping the socket every minute to keep alive
         """
-        while True:
-            await asyncio.sleep(90)
-            if self.connected:
-                await self._send_command("\r\n", terminator="\x00")
+        try:
+            while self.connected:
+                await asyncio.sleep(90)
+                if self.connected:
+                    await self._send_command("\r\n", terminator="\x00")
+        except asyncio.CancelledError:
+            pass
 
     async def _do_recv(self):
-        while self._connection:
-            try:
-                message = await self._connection.receive()
-            except (asyncio.CancelledError, asyncio.TimeoutError):
-                break
-            if not self.connected:
-                break
-            if message.type == aiohttp.WSMsgType.TEXT:
-                if message.data:
-                    await self._receive_command(message.data)
-            elif (
-                message.type == aiohttp.WSMsgType.CLOSE
-                or message.type == aiohttp.WSMsgType.CLOSING
-                or message.type == aiohttp.WSMsgType.CLOSED
-                or message.type == aiohttp.WSMsgType.ERROR
-            ):
-                break
-            else:
-                logger.error(f"Unexpected aiohttp.WSMsgType: {message.type}")
-            await asyncio.sleep(0.0001)
-        await self._disconnect()
+        """
+        Receives data from the websocket. When this task finishes, it signals
+        that the connection is effectively dead.
+        """
+        try:
+            while self.connected:
+                try:
+                    message = await self._connection.receive()
+                except Exception as e:
+                    logger.error(f"Exception during receive, closing connection: {e}")
+                    break
+
+                if message.type == aiohttp.WSMsgType.TEXT:
+                    if message.data:
+                        await self._receive_command(message.data)
+                elif message.type in (
+                    aiohttp.WSMsgType.CLOSE,
+                    aiohttp.WSMsgType.CLOSING,
+                    aiohttp.WSMsgType.CLOSED,
+                    aiohttp.WSMsgType.ERROR,
+                ):
+                    break
+                else:
+                    logger.error(f"Unexpected aiohttp.WSMsgType: {message.type}")
+        except asyncio.CancelledError:
+            pass
 
 
 class Room(Connection, EventHandler):
@@ -258,6 +388,7 @@ class Room(Connection, EventHandler):
         """
         Wait until the connection is closed
         """
+        self.call_event("connect")
         if self._recv_task:
             await self._recv_task
         self.call_event("disconnect")
@@ -283,8 +414,11 @@ class Room(Connection, EventHandler):
         """
         self.reconnect = reconnect
         while True:
-            await self.connect(user_name, password)
-            await self.connection_wait()
+            try:
+                await self.connect(user_name, password)
+                await self.connection_wait()
+            finally:
+                await self._disconnect()
             if not self.reconnect:
                 break
             await asyncio.sleep(3)
@@ -584,7 +718,7 @@ class Room(Connection, EventHandler):
                 self._mods[User(mod)].isadmin = (
                     ModeratorFlags(int(power)) & AdminFlags != 0
                 )
-        self.call_event("connect")
+        self.call_event("ready")
 
     async def _rcmd_inited(self, args):
         await self._reload()
@@ -846,8 +980,8 @@ class Room(Connection, EventHandler):
         self.call_event("clearall", args[0])
 
     async def _rcmd_denied(self, args):
+        self.call_event("denied")
         await self.disconnect()
-        self.call_event("room_denied")
 
     async def _rcmd_updatemoderr(self, args):
         self.call_event("mod_update_error", User(args[1]), args[0])

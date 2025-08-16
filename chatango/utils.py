@@ -1,12 +1,9 @@
-import asyncio
 import random
 import mimetypes
 import html
 import re
 import string
-import asyncio
 import aiohttp
-import urllib
 import logging
 from typing import Optional, Tuple
 
@@ -140,14 +137,13 @@ def trace():
     trace_config.on_request_exception.append(on_request_exception)
     return trace_config
 
-
 _aiohttp_session = None
-
 
 def get_aiohttp_session():
     global _aiohttp_session
     if _aiohttp_session is None:
-        _aiohttp_session = aiohttp.ClientSession(trace_configs=[trace()])
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        _aiohttp_session = aiohttp.ClientSession(timeout=timeout, trace_configs=[trace()])
     return _aiohttp_session
 
 
@@ -227,7 +223,7 @@ def multipart(data, files, boundary=None):
     #         files,
     #     )
     #     headers.update({"host": "chatango.com", "origin": "http://st.chatango.com"})
-    #     async with get_aiohttp_session.post(
+    #     async with get_aiohttp_session().post(
     #         "http://chatango.com/uploadimg",
     #         data=data.encode("latin-1"),
     #         headers=headers,

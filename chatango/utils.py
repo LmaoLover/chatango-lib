@@ -4,6 +4,7 @@ import html
 import re
 import string
 import aiohttp
+import ssl
 import logging
 from typing import Optional, Tuple
 
@@ -142,8 +143,14 @@ _aiohttp_session = None
 def get_aiohttp_session():
     global _aiohttp_session
     if _aiohttp_session is None:
+        # Chatango uses "legacy" connect method
+        ssl_context = ssl.create_default_context()
+        # 0x4 is the underlying OpenSSL value for OP_LEGACY_SERVER_CONNECT
+        ssl_context.options |= 0x4
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+
         timeout = aiohttp.ClientTimeout(total=30, connect=10)
-        _aiohttp_session = aiohttp.ClientSession(timeout=timeout, trace_configs=[trace()])
+        _aiohttp_session = aiohttp.ClientSession(connector=connector, timeout=timeout, trace_configs=[trace()])
     return _aiohttp_session
 
 

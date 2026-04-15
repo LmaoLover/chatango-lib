@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "chatango-lib"
-version = "1.6.0"
+version = "1.6.1"
 description = "Chatango bot library using asyncio"
 authors = [
     "LmaoLover <hello@lmao.love>",

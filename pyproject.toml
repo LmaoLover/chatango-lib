@@ -1,20 +1,23 @@
-[tool.poetry]
+[project]
 name = "chatango-lib"
-version = "1.6.1"
+version = "1.7.0"
 description = "Chatango bot library using asyncio"
-authors = [
-    "LmaoLover <hello@lmao.love>",
-    "neokuze <imneokuze@gmail.com>",
-    "TheClonerx <theclonerx@outlook.com>",
-]
 license = "GPL-3.0-or-later"
 readme = "README.md"
-packages = [{include = "chatango"}]
-
-[tool.poetry.dependencies]
-python = "^3.8"
-aiohttp = "^3.8.6"
+authors = [
+    { name = "LmaoLover", email = "hello@lmao.love" },
+    { name = "neokuze", email = "imneokuze@gmail.com" },
+    { name = "TheClonerx", email = "theclonerx@outlook.com" },
+]
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp>=3.13.5",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11.6,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "."
+module-name = "chatango"

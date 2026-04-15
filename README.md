@@ -1,17 +1,16 @@
 # chatango-lib
 
-Chatango bot library using Python 3.8 and asyncio
+Chatango library using Python 3.9 and asyncio
 
 ### Acknowledgements
 
 Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze/chatango-lib) by authors: [neokuze](https://github.com/neokuze/chatango-lib) and [TheClonerx](https://github.com/TheClonerx)
 
-## Installation
-
 ### Requirements
 
- - `python` 3.8+
- - `pip`
+ - `python` 3.9+
+
+## Installation
 
 ### From Source
 ```

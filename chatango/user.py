@@ -1,12 +1,16 @@
 import enum
-import json, urllib
-from typing import Any, Optional
-import re
 import time
-import datetime
+from typing import Any, Optional
 from collections import deque
 
-from .utils import http_get, public_attributes
+from .utils import public_attributes
+from .resources import (
+    fetch_resources,
+    PathProvider,
+    Styles,
+    UserProfile,
+    MessageBackground,
+)
 
 
 class ModeratorFlags(enum.IntFlag):
@@ -56,17 +60,18 @@ class User:
     def __init__(self, name, **kwargs):
         if hasattr(self, "__new_obj"):
             self._styles = Styles()
+            self._profile = UserProfile()
+            self._background = MessageBackground()
             self._name = name.lower()
             self._ip = None
             self._flags = 0
             self._history = deque(maxlen=5)
-            self._isanon = False
+            self._isanon = kwargs.get("isanon", False)
             self._sids = dict()
             self._showname = name
             self._ispremium = None
             self._puid = str()
             self._client = None
-            self._last_time = None
             delattr(self, "__new_obj")
 
         for attr, val in kwargs.items():
@@ -83,59 +88,94 @@ class User:
         )
 
     @property
-    def age(self):
-        return self.styles._profile["about"]["age"]
+    def styles(self) -> Styles:
+        return self._styles
 
     @property
-    def last_change(self):
-        return self.styles._profile["about"]["last_change"]
+    def profile(self) -> UserProfile:
+        return self._profile
 
     @property
-    def gender(self):
-        return self.styles._profile["about"]["gender"]
+    def background(self) -> MessageBackground:
+        return self._background
 
     @property
-    def location(self):
-        return self.styles._profile["about"]["location"]
+    def about(self):
+        return self.profile.body_html
 
-    @property
-    def get_user_dir(self):
-        if not self.isanon:
-            return "/%s/%s/" % ("/".join((self.name * 2)[:2]), self.name)
+    async def load_resources(self):
+        """Fetches all user resource files and updates instances."""
+        results = await fetch_resources(self.name, [Styles, UserProfile, MessageBackground])
+        if len(results) == 3:
+            # Explicit casting/assignment for type safety
+            self._styles = results[0]
+            self._profile = results[1]
+            self._background = results[2]
+
+    async def save_styles(self, password: str):
+        """Saves current styles to the server via class method."""
+        handle = self.name
+        if not handle:
+            return False
+        return await Styles.save(handle, password, self.styles)
+
+    async def save_profile(self, password: str):
+        """Saves current profile properties to the server via class method."""
+        handle = self.name
+        if not handle:
+            return False
+        return await UserProfile.save(handle, password, self.profile)
+
+    async def save_background(self, password: str):
+        """Saves current background properties to the server and notifies rooms."""
+        handle = self.name
+        if not handle:
+            return False
+
+        # 1. Update background configuration via class method
+        bg_success = await MessageBackground.save(handle, password, self.background)
+
+        # 2. Update styles (includes the usebackground master toggle)
+        style_success = await self.save_styles(password)
+
+        if bg_success or style_success:
+            # 3. Notify rooms via websocket
+            bg_toggle = "1" if self.styles.use_background else "0"
+            for room in self._sids:
+                await room.send_command("msgbg", bg_toggle)
+                await room.send_command("miu")
+
+        return bg_success and style_success
+
+    def clear_styles(self):
+        """Resets the style data to defaults."""
+        self._styles = Styles()
+
+    def clear_profile(self):
+        """Resets the profile data to defaults."""
+        self._profile = UserProfile()
+
+    def clear_background(self):
+        """Resets the background data to defaults."""
+        self._background = MessageBackground()
 
     @property
     def fullpic(self):
         if not self.isanon:
-            return f"{self._fp}{self.get_user_dir}full.jpg"
-        return False
-
-    @property
-    def last_time(self):
-        return self._last_time
+            return PathProvider.get_resource_url(self.name, "full.jpg")
+        return ""
 
     @property
     def msgbg(self):
         if not self.isanon:
-            return f"{self._fp}{self.get_user_dir}msgbg.jpg"
-        return False
-
-    @property
-    def styles(self):
-        return self._styles
+            return PathProvider.get_resource_url(self.name, "msgbg.jpg")
+        return ""
 
     @property
     def thumb(self):
         if not self.isanon:
-            return f"{self._fp}{self.get_user_dir}thumb.jpg"
-        return False
-
-    @property
-    def _fp(self):
-        return "http://fp.chatango.com/profileimg"
-
-    @property
-    def _ust(self):
-        return "http://ust.chatango.com/profileimg"
+            return PathProvider.get_resource_url(self.name, "thumb.jpg")
+        return ""
 
     @property
     def name(self):
@@ -146,21 +186,16 @@ class User:
         return self._puid
 
     @property
-    def ispremium(self):
-        return self._ispremium
+    def ispremium(self) -> bool:
+        return bool(self._ispremium)
+
+    def isowner(self, room) -> bool:
+        """Checks if this user is the owner of the given room."""
+        return room.owner == self
 
     @property
     def showname(self):
         return self._showname
-
-    @property
-    def links(self):
-        return {
-            "msgstyles": f"{self._ust}{self.get_user_dir}msgstyles.json",
-            "msgbg": f"{self._ust}{self.get_user_dir}msgbg.xml",
-            "mod1": f"{self._ust}{self.get_user_dir}mod1.xml",
-            "mod2": f"{self._ust}{self.get_user_dir}mod2.xml",
-        }
 
     @property
     def isanon(self):
@@ -169,11 +204,6 @@ class User:
     def setName(self, val):
         self._showname = val
         self._name = val.lower()
-
-    def del_profile(self):
-        if self.styles.profile:
-            del self._styles._profile
-            self._styles._profile.update(dict(about={}, full={}))
 
     def addSessionId(self, room, sid):
         if room not in self._sids:
@@ -194,185 +224,6 @@ class User:
                 self._sids[room].remove(sid)
             if len(self._sids[room]) == 0:
                 del self._sids[room]
-
-    async def get_styles(self):
-        position_dict = {
-            "tl": "top left",
-            "tr": "top right",
-            "bl": "bottom left",
-            "br": "bottom right",
-        }
-        if not self.isanon:
-            msg_styles = await http_get(self.links["msgstyles"])
-            msg_bg = await http_get(self.links["msgbg"])
-            if msg_bg:
-                bg = msg_bg.replace('<?xml version="1.0" ?>', "")
-                bg_dict = dict(
-                    url.replace('"', "").split("=")
-                    for url in re.findall('(\w+=".*?")', bg)
-                )
-                self._styles._bgstyle.update(bg_dict)
-                self._styles._bgstyle["align"] = position_dict.get(
-                    self._styles._bgstyle["align"]
-                )
-            if msg_styles:
-                try:
-                    styles = json.loads(msg_styles)
-                    self._styles._name_color = styles["nameColor"]
-                    self._styles._font_face = int(styles["fontFamily"])
-                    self._styles._font_size = int(styles["fontSize"])
-                    self._styles._font_color = styles["textColor"]
-                    self._styles._use_background = int(styles["usebackground"])
-                except json.JSONDecodeError:
-                    pass
-
-    async def get_main_profile(self):
-        if not self.isanon:
-            items = await http_get(self.links["mod1"])
-            if items is not None:
-                about = items.replace('<?xml version="1.0" ?>', "")
-                gender_start = about.find("<s>")
-                gender_end = about.find("</s>", gender_start)
-                gender = (
-                    about[gender_start + 3 : gender_end] if gender_start != -1 else "?"
-                )
-                self._styles._profile["about"]["gender"] = gender
-
-                location_start = about.find("<l")
-                location_end = about.find("</l>", location_start)
-                location = (
-                    about[location_start + 2 : location_end]
-                    if location_start != -1
-                    else ""
-                )
-                self._styles._profile["about"]["location"] = location
-
-                last_change_start = about.find("<b>")
-                last_change_end = about.find("</b>", last_change_start)
-                last_change = (
-                    about[last_change_start + 3 : last_change_end]
-                    if last_change_start != -1
-                    else ""
-                )
-                self._styles._profile["about"]["last_change"] = last_change
-
-                if last_change:
-                    age = abs(
-                        datetime.datetime.now().year - int(last_change.split("-")[0])
-                    )
-                    self._styles._profile["about"]["age"] = age
-                body_start = about.find("<body>")
-                body_end = about.find("</body>", body_start)
-                body = about[body_start + 6 : body_end] if body_start != -1 else ""
-                self._styles._profile["about"].update(
-                    {"body": urllib.parse.unquote(body)}
-                )
-
-            try:
-                full_prof = await http_get(self.links["mod2"])
-                if full_prof is not None and str(full_prof)[:5] == "<?xml":
-                    full_prof_start = full_prof.find("<body")
-                    full_prof_end = full_prof.find("</body>", full_prof_start)
-                    full_prof_body = (
-                        full_prof[full_prof_start + len("<body") : full_prof_end]
-                        if full_prof_start != -1
-                        else ""
-                    )
-                    self._styles._profile["full"] = full_prof_body
-            except (AttributeError, KeyError):
-                pass
-
-
-class Styles:
-    def __init__(
-        self,
-        name_color=None,
-        font_color=None,
-        font_face=None,
-        font_size=None,
-        use_background=None,
-    ):
-        self._name_color = name_color if name_color else str("000000")
-        self._font_color = font_color if font_color else str("000000")
-        self._font_size = font_size if font_size else 11
-        self._font_face = font_face if font_face else 0
-        self._use_background = int(use_background) if use_background else 0
-
-        self._blend_name = None
-        self._bgstyle = {
-            "align": "",
-            "bgc": "",
-            "bgalp": "",
-            "hasrec": "0",
-            "ialp": "",
-            "isvid": "0",
-            "tile": "0",
-            "useimg": "0",
-        }
-        self._profile = dict(
-            about=dict(age="", last_change="", gender="?", location="", d="", body=""),
-            full=dict(),
-        )
-
-    def __dir__(self):
-        return public_attributes(self)
-
-    def __repr__(self):
-        return f"nc:{self.name_color} |bg:{self.use_background} |{self.default}"
-
-    @property
-    def aboutme(self):
-        return self._profile["about"]
-
-    @property
-    def fullhtml(self):
-        o = html.escape(urllib.parse.unquote(self._profile["full"] or "")).replace(
-            "\r\n", "\n"
-        )
-        if o:
-            return o
-        else:
-            return None
-
-    @property
-    def fullmini(self):
-        o = html.escape(
-            urllib.parse.unquote(self._profile["about"]["body"] or "")
-        ).replace("\r\n", "\n")
-        if o:
-            return o
-        else:
-            return None
-
-    @property
-    def bgstyle(self):
-        return self._bgstyle
-
-    @property
-    def use_background(self):
-        return self._use_background
-
-    @property
-    def default(self):
-        size = str(self.font_size)
-        face = str(self.font_face)
-        return f"<f x{size}{self.font_color}='{face}'>"
-
-    @property
-    def name_color(self):
-        return self._name_color
-
-    @property
-    def font_color(self):
-        return self._font_color
-
-    @property
-    def font_size(self):
-        return self._font_size
-
-    @property
-    def font_face(self):
-        return self._font_face
 
 
 class Friend:

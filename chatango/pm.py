@@ -4,7 +4,7 @@ from typing import Optional
 
 from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
-from .handler import CommandHandler, EventHandler, TaskHandler
+from .handler import CommandHandler, EventHandler
 from .user import User, Friend
 from .message import _process_pm, message_cut
 
@@ -167,14 +167,8 @@ class PM(Socket, EventHandler):
         else:
             if len(message) > 0:
                 message = message  # format_videos(self.user, message)
-                nc, fs, fc, ff = (
-                    f"<n{self.user.styles.name_color}/>",
-                    f"{self.user.styles.font_size}",
-                    f"{self.user.styles.font_color}",
-                    f"{self.user.styles.font_face}",
-                )
                 for msg in message_cut(message, self._maxlen):
-                    msg = f'{nc}<m v="1"><g xs0="0"><g x{fs}s{fc}="{ff}">{msg}</g></g></m>'
+                    msg = f'{self.user.styles.get_name_tag()}<m v="1"><g xs0="0">{self.user.styles.format_message(msg, is_pm=True)}</g></m>'
                     await self.send_command("msg", target.lower(), msg)
 
     async def block(self, user):  # TODO

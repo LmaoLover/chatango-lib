@@ -3,8 +3,9 @@ import time
 import enum
 from typing import Optional
 
-from .utils import get_anon_name, _clean_message, _parseFont, public_attributes
+from .utils import get_anon_name, public_attributes
 from .user import User
+from .resources import Styles
 
 
 class MessageFlags(enum.IntFlag):
@@ -26,15 +27,15 @@ class MessageFlags(enum.IntFlag):
 
 
 Fonts = {
-    "0": "arial",
-    "1": "comic",
-    "2": "georgia",
-    "3": "handwriting",
-    "4": "impact",
-    "5": "palatino",
-    "6": "papirus",
-    "7": "times",
-    "8": "typewriter",
+    "0": "Arial",
+    "1": "Comic",
+    "2": "Georgia",
+    "3": "Handwriting",
+    "4": "Impact",
+    "5": "Palatino",
+    "6": "Papyrus",
+    "7": "Times",
+    "8": "Typewriter",
 }
 
 
@@ -45,8 +46,35 @@ class Message:
         self.time = 0.0
         self.body = str()
         self.raw = str()
-        self.styles = None
+        self._styles = None
         self.channel: Optional[Channel] = None
+
+    @property
+    def styles(self):
+        """Lazily creates a Styles object for this specific message instance."""
+        if self._styles is None:
+            is_pm = isinstance(self, PMMessage)
+            self._styles = Styles.parse(self.raw, is_pm=is_pm)
+        return self._styles
+
+    def clear_styles(self):
+        """Resets the style data to defaults."""
+        self._styles = None
+
+    @property
+    def _clean_body_text(self):
+        """Strips Chatango tags from the raw message to get clean body text."""
+        import html
+
+        is_pm = isinstance(self, PMMessage)
+        tag = "g" if is_pm else "f"
+        # Strip <n.../>, <f...>, <g...>, <b>, <i>, <u>, and closing tags
+        text = re.sub(
+            r"<(n|/?b|/?i|/?u|/?" + tag + r")[^>]*>", "", self.raw, flags=re.IGNORECASE
+        )
+        # Convert <br/> to newline
+        text = re.sub(r"<br[^>]*>", "\n", text, flags=re.IGNORECASE)
+        return html.unescape(text).replace("\r", "\n").strip()
 
     def __dir__(self):
         return public_attributes(self)
@@ -57,12 +85,14 @@ class Message:
 
 class PMMessage(Message):
     def __init__(self):
+        super().__init__()
         self.msgoff = False
         self.flags = str(0)
 
 
 class RoomMessage(Message):
     def __init__(self):
+        super().__init__()
         self.id = None
         self.puid = str()
         self.ip = str()
@@ -84,41 +114,18 @@ async def _process(room, args):
     msg.unid = unid
     msg.ip = ip
     msg.raw = body
-    body, n, f = _clean_message(body)
-    strip_body = (
-        " ".join(body.split(" ")[:-1]) + " " + body.split(" ")[-1].replace("\n", "")
-    )
-    msg.body = strip_body.strip()
-    name_color = None
+    msg.body = msg._clean_body_text
     isanon = False
-    if name == "":
+    if not name:
         isanon = True
         if not tname:
-            if n in ["None"]:
-                n = None
-            if not isinstance(n, type(None)):
-                name = get_anon_name(n, puid)
-            else:
-                name = get_anon_name("", puid)
+            n_match = re.search(r"<n(\d{4})/?\s*>", msg.raw)
+            n = n_match.group(1) if n_match else ""
+            name = get_anon_name(n, puid)
         else:
             name = tname
-    else:
-        if n:
-            name_color = n
-        else:
-            name_color = None
     msg.user = User(name, ip=ip, isanon=isanon)
-    msg.user._styles._name_color = name_color
-    msg.styles = msg.user._styles
-    msg.styles._font_size, msg.styles._font_color, msg.styles._font_face = _parseFont(
-        f.strip()
-    )
-    if msg.styles._font_size == None:
-        msg.styles._font_size = 11
     msg.flags = MessageFlags(int(flags))
-    if MessageFlags.BG_ON in msg.flags:
-        if MessageFlags.PREMIUM in msg.flags:
-            msg.styles._use_background = 1
     msg.mentions = mentions(msg.body, room)
     msg.channel = Channel(msg.room, msg.user)
     ispremium = MessageFlags.PREMIUM in msg.flags
@@ -141,20 +148,12 @@ async def _process_pm(room, args):
     user = User(name)
     mtime = float(args[3]) - room._correctiontime
     rawmsg = ":".join(args[5:])
-    body, n, f = _clean_message(rawmsg, pm=True)
-    name_color = n or None
-    font_size, font_color, font_face = _parseFont(f)
     msg = PMMessage()
     msg.room = room
     msg.user = user
     msg.time = mtime
-    msg.body = body
     msg.raw = rawmsg
-    msg.styles = msg.user._styles
-    msg.styles._name_color = name_color
-    msg.styles._font_size = font_size
-    msg.styles._font_color = font_color
-    msg.styles._font_face = font_face
+    msg.body = msg._clean_body_text
     msg.channel = Channel(msg.room, msg.user)
     return msg
 

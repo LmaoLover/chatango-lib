@@ -249,55 +249,11 @@ def multipart(data, files, boundary=None):
     #     return None
 
 
-async def http_get(url: str, session: Optional[aiohttp.ClientSession] = None):
-    if not session:
-        session = get_aiohttp_session()
-    async with session.get(url) as resp:
-        assert resp.status == 200
-        try:
-            resp = await resp.text()
-            return resp
-        except:
-            return None
-
-
 def gen_uid() -> str:
     """
     Generate an uid
     """
     return str(random.randrange(10**15, 10**16))
-
-
-def _clean_message(msg: str, pm: bool = False) -> Tuple[str, str, str]:
-    n = re.search("<n(.*?)/>", msg)
-    tag = pm and "g" or "f"
-    f = re.search("<" + tag + "(.*?)>", msg)
-    msg = re.sub("<" + tag + ".*?>" + '|"<i s=sm://(.*)"', "", msg)
-    if n:
-        n = n.group(1)
-    if f:
-        f = f.group(1)
-    msg = re.sub("<n.*?/>", "", msg)
-    msg = _strip_html(msg)
-    msg = html.unescape(msg).replace("\r", "\n")
-    return msg, n or "", f or ""
-
-
-def _strip_html(msg: str) -> str:
-    li = msg.split("<")
-    if len(li) == 1:
-        return li[0]
-    else:
-        ret = list()
-        for data in li:
-            data = data.split(">", 1)
-            if len(data) == 1:
-                ret.append(data[0])
-            elif len(data) == 2:
-                if data[0].startswith("br"):
-                    ret.append("\n")
-                ret.append(data[1])
-        return "".join(ret)
 
 
 def _id_gen():

@@ -21,6 +21,7 @@ from .utils import (
 )
 from .message import Message, MessageFlags, _process, message_cut
 from .user import User, ModeratorFlags, AdminFlags
+from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
 from .handler import CommandHandler, EventHandler
 
@@ -261,10 +262,11 @@ class Room(Connection, EventHandler):
         return public_attributes(self)
 
     def __init__(self, name: str):
-        super().__init__()
+        Connection.__init__(self)
         self.assert_valid_name(name)
         self.name = name
         self.server = get_server(name)
+        self._profile = RoomProfile()
         self.reconnect = False
         self.owner: Optional[User] = None
         self._uid = gen_uid()
@@ -293,6 +295,23 @@ class Room(Connection, EventHandler):
 
     def __repr__(self):
         return f"<Room {self.name}>"
+
+    @property
+    def profile(self) -> RoomProfile:
+        return self._profile
+
+    async def load_profile(self):
+        """Fetches the group profile resource and updates instance."""
+        results = await fetch_resources(self.name, [RoomProfile])
+        if results:
+            self._profile = results[0]
+
+    async def save_profile(self, password: str):
+        """Saves current room profile properties to the server via class method."""
+        handle = self.user.name
+        if not handle:
+            return False
+        return await RoomProfile.save(self.name, password, self.profile)
 
     @property
     def is_pm(self):
@@ -325,6 +344,14 @@ class Room(Connection, EventHandler):
     @property
     def silent(self):
         return self._silent
+
+    @property
+    def description(self):
+        return self.profile.group_body_html
+
+    @property
+    def title(self):
+        return self.profile.group_title
 
     @property
     def banlist(self):
@@ -450,20 +477,21 @@ class Room(Connection, EventHandler):
                 msg = html.escape(msg, quote=False)
             msg = msg.replace("\n", "\r").replace("~", "&#126;")
             for msg in message_cut(msg, self._maxlen):
-                message = f'<n{self.user.styles.name_color}/><f x{self.user.styles.font_size}{self.user.styles.font_color}="{self.user.styles.font_face}">{msg}</f>'
-                await self.send_command("bm", _id_gen(), str(message_flags), message)
+                is_anon = self.user.isanon
+                styled_msg = f"{self.user.styles.get_name_tag(is_anon)}{self.user.styles.format_message(msg, is_anon=is_anon)}"
+                await self.send_command("bm", _id_gen(), str(message_flags), styled_msg)
 
     def set_font(
         self, name_color=None, font_color=None, font_size=None, font_face=None
     ):
         if name_color:
-            self._user._styles._name_color = str(name_color)
+            self.user.styles.name_color = str(name_color)
         if font_color:
-            self._user._styles._font_color = str(font_color)
+            self.user.styles.font_color = str(font_color)
         if font_size:
-            self._user._styles._font_size = int(font_size)
+            self.user.styles.font_size = int(font_size)
         if font_face:
-            self._user._styles._font_face = int(font_face)
+            self.user.styles.font_face = int(font_face)
 
     async def enable_bg(self):
         await self.set_bg_mode(1)
@@ -684,9 +712,7 @@ class Room(Connection, EventHandler):
 
     async def _style_init(self, user):
         if not user.isanon:
-            if self.user.ispremium:
-                await user.get_styles()
-            await user.get_main_profile()
+            await user.load_resources()
         else:
             self.set_font(
                 name_color="000000", font_color="000000", font_size=11, font_face=1
@@ -701,6 +727,7 @@ class Room(Connection, EventHandler):
         self._correctiontime = int(float(self._connectiontime) - time.time())
         self._currentIP = args[5]
         self._flags = RoomFlags(int(args[7]))
+        await self.load_profile()
         if self._login_as == "C":
             uname = get_anon_name(
                 str(self._correctiontime).split(".")[0][-4:].replace("-", ""),
@@ -709,6 +736,7 @@ class Room(Connection, EventHandler):
             self._user = User(uname, isanon=True, ip=self._currentIP)
         elif self._login_as == "M":
             self._user = User(self._currentname, puid=self._puid, ip=self._currentIP)
+            await self._style_init(self._user)
         elif self._login_as == "N":
             pass
         for mod in args[6].split(";"):
@@ -758,11 +786,11 @@ class Room(Connection, EventHandler):
         else:
             self._mqueue[msg.id] = msg
 
-    async def _rcmd_premium(self, args):  # TODO
-        if self._bgmode and (
-            args[0] == "210" or (isinstance(self, Room) and self.owner == self.user)
-        ):
-            self.user._ispremium = True
+    async def _rcmd_premium(self, args):
+        code = args[0]
+        is_prem = code in ["200", "210"] or (self.owner == self.user)
+        self.user._ispremium = is_prem
+        if is_prem and self._bgmode:
             await self.send_command("msgbg", str(self._bgmode))
 
     async def _rcmd_u(self, args):
@@ -877,7 +905,7 @@ class Room(Connection, EventHandler):
 
         # Last mod removed
         if len(args) == 1 and args[0] == "":
-            (user, _) = pre.popitem()
+            user, _ = pre.popitem()
             self.call_event("mod_remove", user)
             return
 
@@ -999,8 +1027,14 @@ class Room(Connection, EventHandler):
         """Temporary ban sigue activo con el tiempo indicado"""
         self.call_event("temp_ban", int(args[0]))
 
+    async def _rcmd_updgroupinfo(self, args):
+        await self.load_profile()
+        self.call_event("group_info_update")
+
     async def _rcmd_miu(self, args):
-        self.call_event("bg_reload", User(args[0]))
+        user = User(args[0])
+        await user.load_resources()
+        self.call_event("bg_reload", user)
 
     async def _rcmd_delete(self, args):
         """Borrar un mensaje de mi vista actual"""

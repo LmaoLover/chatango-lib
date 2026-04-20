@@ -1,6 +1,6 @@
 [project]
 name = "chatango-lib"
-version = "1.7.0"
+version = "1.8.0"
 description = "Chatango bot library using asyncio"
 license = "GPL-3.0-or-later"
 readme = "README.md"

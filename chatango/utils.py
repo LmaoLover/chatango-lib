@@ -260,24 +260,6 @@ def _id_gen():
     return "".join(random.choice(string.ascii_uppercase) for i in range(4)).lower()
 
 
-def get_anon_name(tssid: str, puid: str) -> str:
-    puid = puid.zfill(8)[4:8]
-    ts = str(tssid)
-    if not ts or len(ts) < 4:
-        ts = "3452"
-    else:
-        ts = ts.split(".")[0][-4:]
-    __reg5 = ""
-    __reg1 = 0
-    while __reg1 < len(puid):
-        __reg4 = int(puid[__reg1])
-        __reg3 = int(ts[__reg1])
-        __reg2 = str(__reg4 + __reg3)
-        __reg5 += __reg2[-1:]
-        __reg1 += 1
-    return "anon" + __reg5.zfill(4)
-
-
 def _fontFormat(text):
     # TODO check
     """Converts */_ into whattsap like formats"""

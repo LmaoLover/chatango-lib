@@ -1,10 +1,11 @@
 import re
 import time
 import enum
+import html
 from typing import Optional
 
-from .utils import get_anon_name, public_attributes
-from .user import User
+from .utils import public_attributes
+from .user import User, UserManager
 from .resources import Styles
 
 
@@ -47,7 +48,6 @@ class Message:
         self.body = str()
         self.raw = str()
         self._styles = None
-        self.channel: Optional[Channel] = None
 
     @property
     def styles(self):
@@ -64,8 +64,6 @@ class Message:
     @property
     def _clean_body_text(self):
         """Strips Chatango tags from the raw message to get clean body text."""
-        import html
-
         is_pm = isinstance(self, PMMessage)
         tag = "g" if is_pm else "f"
         # Strip <n.../>, <f...>, <g...>, <b>, <i>, <u>, and closing tags
@@ -94,50 +92,44 @@ class RoomMessage(Message):
     def __init__(self):
         super().__init__()
         self.id = None
-        self.puid = str()
+        self.short_cookie = str()
         self.ip = str()
-        self.unid = str()
+        self.encoded_cookie = str()
         self.flags = 0
-        self.mentions = list()
 
 
 async def _process(room, args):
     """Process message"""
-    _time = float(args[0]) - room._correctiontime
-    name, tname, puid, unid, msgid, ip, flags = args[1:8]
+    _time = float(args[0]) - room.session.correction_time
+    name, tname, aid, encoded_cookie, msgid, ip, flags = args[1:8]
     body = ":".join(args[9:])
     msg = RoomMessage()
     msg.room = room
     msg.time = float(_time)
-    msg.puid = str(puid)
+    msg.short_cookie = str(aid)
     msg.id = msgid
-    msg.unid = unid
+    msg.encoded_cookie = encoded_cookie
     msg.ip = ip
     msg.raw = body
     msg.body = msg._clean_body_text
-    isanon = False
-    if not name:
-        isanon = True
-        if not tname:
-            n_match = re.search(r"<n(\d{4})/?\s*>", msg.raw)
-            n = n_match.group(1) if n_match else ""
-            name = get_anon_name(n, puid)
-        else:
-            name = tname
-    msg.user = User(name, ip=ip, isanon=isanon)
+
+    if name:
+        # Registered User
+        msg.user = UserManager.get_user(name=name)
+    else:
+        # Anonymous or Temporary User
+        n_match = re.search(r"<n(\d{4})/?\s*>", msg.raw)
+        n = n_match.group(1) if n_match else "3452"
+        msg.user = UserManager.get_user(name=tname, aid=aid, display_id=n)
+
     msg.flags = MessageFlags(int(flags))
-    msg.mentions = mentions(msg.body, room)
-    msg.channel = Channel(msg.room, msg.user)
     ispremium = MessageFlags.PREMIUM in msg.flags
-    if msg.user.ispremium != ispremium:
-        evt = (
-            msg.user._ispremium != None
-            and ispremium != None
-            and _time > time.time() - 5
-        )
-        msg.user._ispremium = ispremium
-        if evt:
+
+    if msg.user._ispremium != ispremium:
+        # Only call event if we knew the status before and it's not a historical message
+        if msg.user._ispremium is not None and _time > time.time() - 5:
             room.call_event("premium_change", msg.user, ispremium)
+        msg.user.ispremium = ispremium
     return msg
 
 
@@ -145,8 +137,8 @@ async def _process_pm(room, args):
     name = args[0] or args[1]
     if not name:
         name = args[2]
-    user = User(name)
-    mtime = float(args[3]) - room._correctiontime
+    user = UserManager.get_user(name=name)
+    mtime = float(args[3]) - room.session.correction_time
     rawmsg = ":".join(args[5:])
     msg = PMMessage()
     msg.room = room
@@ -154,66 +146,8 @@ async def _process_pm(room, args):
     msg.time = mtime
     msg.raw = rawmsg
     msg.body = msg._clean_body_text
-    msg.channel = Channel(msg.room, msg.user)
     return msg
 
 
 def message_cut(message, lenth):
     return [message[x : x + lenth] for x in range(0, len(message), lenth)]
-
-
-def mentions(body, room):
-    t = []
-    for match in re.findall("(\s)?@([a-zA-Z0-9]{1,20})(\s)?", body):
-        for participant in room.userlist:
-            if participant.name.lower() == match[1].lower():
-                if participant not in t:
-                    t.append(participant)
-    return t
-
-
-class Channel:
-    def __init__(self, room, user):
-        self.is_pm = True if room.name == "<PM>" else False
-        self.user = user
-        self.room = room
-
-    def __dir__(self):
-        return public_attributes(self)
-
-    async def send_message(self, message, use_html=False):
-        messages = message_cut(message, self.room._maxlen)
-        for message in messages:
-            if self.is_pm:
-                await self.room.send_message(self.user.name, message, use_html=use_html)
-            else:
-                await self.room.send_message(message, use_html=use_html)
-
-    async def send_pm(self, message):
-        self.is_pm = True
-        await self.send_message(message)
-
-
-# def format_videos(user, pmmessage): pass #TODO TESTING
-#     msg = pmmessage
-#     tag = 'i'
-#     r = []
-#     for word in msg.split(' '):
-#         if msg.strip() != "":
-#             regx = re.compile(r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/(watch\?v=|embed/|v/|.+\?v=)?(?P<id>[A-Za-z0-9\-=_]{11})') #"<" + tag + "(.*?)>", msg)
-#             match = regx.match(word)
-#             w = "<g x{0._fontSize}s{0._fontColor}=\"{0._fontFace}\">".format(user)
-#             if match:
-#                 seek = match.group('id')
-#                 word = f"<i s=\"vid','//yt','{seek}\" w=\"126\" h=\"93\"/>{w}"
-#                 r.append(word)
-#             else:
-#                 if not r:
-#                     r.append(w+word)
-#                 else:
-#                     r.append(word)
-#             count = len([x for x in r if x == w])
-#             print(count)
-
-#     print(r)
-#     return " ".join(r)

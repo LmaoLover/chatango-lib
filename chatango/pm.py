@@ -5,7 +5,7 @@ from typing import Optional
 from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
 from .handler import CommandHandler, EventHandler
-from .user import User, Friend
+from .user import User, Friend, UserManager, Session
 from .message import _process_pm, message_cut
 
 
@@ -82,10 +82,9 @@ class PM(Socket, EventHandler):
         super().__init__()
         self.server = "c1.chatango.com"
         self.port = 443
-        self.user = None
+        self.session: Session = Session(room=self, user=UserManager.get_user())
         self.reconnect = False
         self.__token = None
-        self._correctiontime = 0
 
         # misc
         self._uid = gen_uid()
@@ -109,6 +108,10 @@ class PM(Socket, EventHandler):
     @property
     def is_pm(self):
         return True
+
+    @property
+    def user(self):
+        return self.session.user
 
     @property
     def premium(self):
@@ -137,7 +140,7 @@ class PM(Socket, EventHandler):
             self.__token = await get_token(user_name, password)
         if self.__token:
             await self.send_command("tlogin", self.__token, "2", self._uid)
-            self.user = User(user_name)
+            self.session.user = UserManager.get_user(user_name)
 
     async def connection_wait(self):
         if self._recv_task:
@@ -176,15 +179,15 @@ class PM(Socket, EventHandler):
             user = user.name
         if user not in self._blocked:
             await self.send_command("block", user, user, "S")
-            self._blocked.append(User(user))
-            self.call_event("pm_block", User(user))
+            self._blocked.append(UserManager.get_user(user))
+            self.call_event("pm_block", UserManager.get_user(user))
 
     async def unblock(self, user):
         if isinstance(user, User):
             user = user.name
         if user in self._blocked:
             await self.send_command("unblock", user)
-            self.call_event("pm_unblock", User(user))
+            self.call_event("pm_unblock", UserManager.get_user(user))
             return True
 
     def get_friend(self, user):
@@ -229,8 +232,9 @@ class PM(Socket, EventHandler):
             await self.enable_bg()
 
     async def _rcmd_time(self, args):
-        self._connectiontime = float(args[0])
-        self._correctiontime = float(self._connectiontime) - time.time()
+        conn_time = args[0]
+        self.session.conn_time = conn_time
+        self.session.correction_time = int(float(conn_time) - time.time())
 
     async def _rcmd_kickingoff(self, args):
         self.call_event("pm_kickingoff", args)
@@ -246,6 +250,10 @@ class PM(Socket, EventHandler):
         if self.friends or self.blocked:
             self.friends.clear()
             self.blocked.clear()
+
+        # Update session (cookie and IP are not provided in PM OK)
+        self.session.conn_time = str(time.time() + self.session.correction_time)
+
         await self.send_command("getpremium")
         await self.send_command("wl")
         await self.send_command("getblock")
@@ -282,7 +290,7 @@ class PM(Socket, EventHandler):
         # Iterate over each contact
         for i in range(len(args) // 4):
             name, last_on, is_on, idle = args[i * 4 : i * 4 + 4]
-            user = User(name)
+            user = UserManager.get_user(name)
             friend = Friend(user, self)
             if last_on == "None":
                 last_on = 0
@@ -331,7 +339,7 @@ class PM(Socket, EventHandler):
             return
         friend = self._friends[args[0]] if args[0] in self.friends else None
         if not friend:
-            friend = Friend(User(args[0]), self)
+            friend = Friend(UserManager.get_user(args[0]), self)
             self._friends[args[0]] = friend
             self.call_event("pm_contact_addfriend", friend)
             await self.send_command("wl")

@@ -1,6 +1,7 @@
 import enum
 import time
-from typing import Any, Optional
+import weakref
+from typing import Any, Optional, Dict, Type
 from collections import deque
 
 from .utils import public_attributes
@@ -44,48 +45,172 @@ AdminFlags = (
 )
 
 
+def get_anon_name(tssid: str, aid: str) -> str:
+    """Derives an anonymous handle from a tag ID and shortened cookie."""
+    aid = aid.zfill(8)[4:8]
+    ts = str(tssid)
+    if not ts or len(ts) < 4:
+        ts = "3452"
+    else:
+        ts = ts.split(".")[0][-4:]
+    __reg5 = ""
+    __reg1 = 0
+    while __reg1 < len(aid):
+        __reg4 = int(aid[__reg1])
+        __reg3 = int(ts[__reg1])
+        __reg2 = str(__reg4 + __reg3)
+        __reg5 += __reg2[-1:]
+        __reg1 += 1
+    return "anon" + __reg5.zfill(4)
+
+
 class User:
-    _users = {}
+    """Base class for all Chatango users."""
 
-    def __new__(cls, name, **kwargs):
-        key = name.lower()
-        if key in User._users:
-            user = User._users[key]
-        else:
-            user = super().__new__(cls)
-            setattr(user, "__new_obj", True)
-            User._users[key] = user
-        return user
-
-    def __init__(self, name, **kwargs):
-        if hasattr(self, "__new_obj"):
-            self._styles = Styles()
-            self._profile = UserProfile()
-            self._background = MessageBackground()
-            self._name = name.lower()
-            self._ip = None
-            self._flags = 0
-            self._history = deque(maxlen=5)
-            self._isanon = kwargs.get("isanon", False)
-            self._sids = dict()
-            self._showname = name
-            self._ispremium = None
-            self._puid = str()
-            self._client = None
-            delattr(self, "__new_obj")
-
-        for attr, val in kwargs.items():
-            if attr == "ip" and not val:
-                continue  # only valid ips
-            setattr(self, "_" + attr, val)
+    def __init__(self, **kwargs):
+        self._flags = 0
+        self._history = deque(maxlen=5)
+        self._sessions = weakref.WeakSet()  # set(Session)
+        self._ispremium = None
+        self._client = None
+        self._showname = kwargs.get("showname")
 
     def __dir__(self):
         return public_attributes(self)
 
     def __repr__(self):
-        return "<User name:{} puid:{} ip:{}>".format(
-            self.showname, self._puid, self._ip
+        return "<{} name:{} sid:{} aid:{}>".format(
+            self.__class__.__name__, self.showname, self.sid, self.aid
         )
+
+    @property
+    def styles(self) -> Styles:
+        """Read-only default styles for base users. Overridden in RegisteredUser."""
+        return Styles()
+
+    @property
+    def profile(self) -> UserProfile:
+        """Read-only default profile for base users. Overridden in RegisteredUser."""
+        return UserProfile()
+
+    @property
+    def background(self) -> MessageBackground:
+        """Read-only default background for base users. Overridden in RegisteredUser."""
+        return MessageBackground()
+
+    @property
+    def about(self):
+        return self.profile.body_html
+
+    async def load_resources(self):
+        """Base users have no resources to fetch."""
+        pass
+
+    async def save_styles(self, password: str) -> bool:
+        """Base users cannot save styles."""
+        return False
+
+    async def save_profile(self, password: str) -> bool:
+        """Base users cannot save profile."""
+        return False
+
+    async def save_background(self, password: str) -> bool:
+        """Base users cannot save background."""
+        return False
+
+    def clear_styles(self):
+        """Base users have no style data to clear."""
+        pass
+
+    def clear_profile(self):
+        """Base users have no profile data to clear."""
+        pass
+
+    def clear_background(self):
+        """Base users have no background data to clear."""
+        pass
+
+    @property
+    def fullpic(self) -> str:
+        return ""
+
+    @property
+    def msgbg(self) -> str:
+        return ""
+
+    @property
+    def thumb(self) -> str:
+        return ""
+
+    @property
+    def name(self) -> str:
+        """Lowercase identifier for the user."""
+        return self._showname.lower() if self._showname else ""
+
+    @property
+    def showname(self) -> str:
+        return self._showname or self.name
+
+    @property
+    def sid(self):
+        return None
+
+    @property
+    def aid(self):
+        return None
+
+    @property
+    def ispremium(self) -> bool:
+        return bool(self._ispremium)
+
+    @ispremium.setter
+    def ispremium(self, value):
+        self._ispremium = bool(value) if value is not None else None
+
+    def isowner(self, room) -> bool:
+        """Checks if this user is the owner of the given room."""
+        return room.owner == self
+
+    @property
+    def isanon(self):
+        return not isinstance(self, RegisteredUser)
+
+    @property
+    def istemp(self):
+        return isinstance(self, TemporaryUser)
+
+    def addSession(self, session):
+        self._sessions.add(session)
+
+    def getSessions(self, room=None):
+        if room:
+            return {s for s in self._sessions if s.room == room}
+        else:
+            return set(self._sessions)
+
+    def removeSession(self, session):
+        if session in self._sessions:
+            self._sessions.remove(session)
+
+
+class RegisteredUser(User):
+    """A registered Chatango user."""
+
+    def __init__(self, name, **kwargs):
+        super().__init__(**kwargs)
+        self._name = name.lower()
+        self._showname = name
+        self._styles = Styles()
+        self._profile = UserProfile()
+        self._background = MessageBackground()
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def sid(self):
+        return self._name
 
     @property
     def styles(self) -> Styles:
@@ -99,15 +224,12 @@ class User:
     def background(self) -> MessageBackground:
         return self._background
 
-    @property
-    def about(self):
-        return self.profile.body_html
-
     async def load_resources(self):
         """Fetches all user resource files and updates instances."""
-        results = await fetch_resources(self.name, [Styles, UserProfile, MessageBackground])
+        results = await fetch_resources(
+            self.name, [Styles, UserProfile, MessageBackground]
+        )
         if len(results) == 3:
-            # Explicit casting/assignment for type safety
             self._styles = results[0]
             self._profile = results[1]
             self._background = results[2]
@@ -132,18 +254,15 @@ class User:
         if not handle:
             return False
 
-        # 1. Update background configuration via class method
         bg_success = await MessageBackground.save(handle, password, self.background)
-
-        # 2. Update styles (includes the usebackground master toggle)
         style_success = await self.save_styles(password)
 
         if bg_success or style_success:
-            # 3. Notify rooms via websocket
             bg_toggle = "1" if self.styles.use_background else "0"
-            for room in self._sids:
-                await room.send_command("msgbg", bg_toggle)
-                await room.send_command("miu")
+            for session in self._sessions:
+                if session.room:
+                    await session.room.send_command("msgbg", bg_toggle)
+                    await session.room.send_command("miu")
 
         return bg_success and style_success
 
@@ -161,69 +280,132 @@ class User:
 
     @property
     def fullpic(self):
-        if not self.isanon:
-            return PathProvider.get_resource_url(self.name, "full.jpg")
-        return ""
+        return PathProvider.get_resource_url(self.name, "full.jpg")
 
     @property
     def msgbg(self):
-        if not self.isanon:
-            return PathProvider.get_resource_url(self.name, "msgbg.jpg")
-        return ""
+        return PathProvider.get_resource_url(self.name, "msgbg.jpg")
 
     @property
     def thumb(self):
-        if not self.isanon:
-            return PathProvider.get_resource_url(self.name, "thumb.jpg")
-        return ""
+        return PathProvider.get_resource_url(self.name, "thumb.jpg")
+
+
+class AnonymousUser(User):
+    """A generic anonymous Chatango user."""
+
+    def __init__(self, aid, **kwargs):
+        super().__init__(**kwargs)
+        self._aid = aid
+        self._display_id = str(kwargs.get("display_id", "3452"))
+
+    @property
+    def aid(self):
+        return self._aid
 
     @property
     def name(self):
-        return self._name
+        return get_anon_name(self._display_id, self.aid)
+
+
+class TemporaryUser(AnonymousUser):
+    """An anonymous user with a temporary name."""
 
     @property
-    def puid(self):
-        return self._puid
+    def name(self) -> str:
+        return self.showname.lower()
 
-    @property
-    def ispremium(self) -> bool:
-        return bool(self._ispremium)
 
-    def isowner(self, room) -> bool:
-        """Checks if this user is the owner of the given room."""
-        return room.owner == self
+class Session:
+    """Represents an active connection session to a room."""
 
-    @property
-    def showname(self):
-        return self._showname
+    def __init__(
+        self,
+        user: Optional[User] = None,
+        room: Optional[Any] = None,
+        session_id: Optional[str] = None,
+        short_cookie: Optional[str] = None,
+        encoded_cookie: Optional[str] = None,
+        ts_id: Optional[str] = None,
+        ip: Optional[str] = None,
+        conn_time: Optional[str] = None,
+        correction_time: int = 0,
+        badge: int = 0
+    ):
+        self.user = user
+        self.room = room
+        self.session_id = session_id  # SSID
+        self.short_cookie = short_cookie # AID
+        self.encoded_cookie = encoded_cookie
+        self.ts_id = ts_id
+        self.ip = ip
+        self.conn_time = conn_time
+        self.correction_time = correction_time
+        self.badge = badge
 
-    @property
-    def isanon(self):
-        return self._isanon
+    def __repr__(self):
+        name = self.user.showname if self.user else "Unknown"
+        return f"<Session user:{name} ssid:{self.session_id} ip:{self.ip}>"
 
-    def setName(self, val):
-        self._showname = val
-        self._name = val.lower()
 
-    def addSessionId(self, room, sid):
-        if room not in self._sids:
-            self._sids[room] = set()
-        self._sids[room].add(sid)
+class UserManager:
+    """Manages the lifecycle and caching of User objects."""
 
-    def getSessionIds(self, room=None):
-        if room:
-            return self._sids.get(room, set())
+    _users = weakref.WeakValueDictionary()
+
+    def __init__(self):
+        raise RuntimeError("UserManager cannot be instantiated. Use UserManager.get_user() instead.")
+
+    @classmethod
+    def get_user(
+        cls,
+        name: Optional[str] = None,
+        aid: Optional[str] = None,
+        **kwargs,
+    ) -> User:
+        """Retrieves or creates a User instance."""
+        # Normalize "None" and empty strings
+        if name == "None" or not name:
+            name = None
+        if aid == "None" or not aid:
+            aid = None
+
+        if name and not aid:
+            # Registered User
+            sid = name.lower()
+            key = f"R:{sid}"
+            user_cls = RegisteredUser
+            id_val = name
+        elif name and aid:
+            # Temporary User
+            key = f"T:{aid}"
+            user_cls = TemporaryUser
+            id_val = aid
+            kwargs["showname"] = name
+        elif aid:
+            # Anonymous User
+            key = f"A:{aid}"
+            user_cls = AnonymousUser
+            id_val = aid
         else:
-            return set.union(*self._sids.values())
+            # Not enough info to cache/identify uniquely
+            return AnonymousUser(aid or "", showname=name, **kwargs)
 
-    def removeSessionId(self, room, sid):
-        if room in self._sids:
-            if not sid:
-                self._sids[room].clear()
-            elif sid in self._sids[room]:
-                self._sids[room].remove(sid)
-            if len(self._sids[room]) == 0:
-                del self._sids[room]
+        if key in cls._users:
+            user = cls._users[key]
+            # Update transient attributes if provided
+            if isinstance(user, AnonymousUser):
+                if "display_id" in kwargs:
+                    user._display_id = str(kwargs["display_id"])
+            
+            # Unified name update
+            if name:
+                user._showname = name
+            return user
+
+        user = user_cls(id_val, **kwargs)
+        cls._users[key] = user
+        return user
 
 
 class Friend:

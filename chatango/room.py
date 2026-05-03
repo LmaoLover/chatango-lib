@@ -14,13 +14,11 @@ from typing import Optional
 from .utils import (
     get_aiohttp_session,
     get_server,
-    gen_uid,
-    get_anon_name,
     _id_gen,
     public_attributes,
 )
-from .message import Message, MessageFlags, _process, message_cut
-from .user import User, ModeratorFlags, AdminFlags
+from .message import MessageFlags, RoomMessage, _process, message_cut
+from .user import User, ModeratorFlags, AdminFlags, UserManager, Session
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
 from .handler import CommandHandler, EventHandler
@@ -256,7 +254,7 @@ class Connection(CommandHandler):
 
 
 class Room(Connection, EventHandler):
-    _BANDATA = namedtuple("BanData", ["unid", "ip", "target", "time", "src"])
+    _BANDATA = namedtuple("BanData", ["encoded_cookie", "ip", "target", "time", "src"])
 
     def __dir__(self):
         return public_attributes(self)
@@ -269,12 +267,10 @@ class Room(Connection, EventHandler):
         self._profile = RoomProfile()
         self.reconnect = False
         self.owner: Optional[User] = None
-        self._uid = gen_uid()
         self._banned_words = ("", "")
-        self._user = None
+        self.session: Session = Session(room=self, user=UserManager.get_user())
         self._silent = False
         self._mods = dict()
-        self._userhistory = deque(maxlen=10)
         self._userdict = dict()
         self._mqueue = dict()
         self._uqueue = dict()
@@ -287,11 +283,9 @@ class Room(Connection, EventHandler):
         self._maxlen = 2800
         self._bgmode = 0
         self._nomore = False
-        self._connectiontime = None
         self.message_flags = 0
         self._announcement = [0, 0, ""]
         self._rate_limit = 0
-        self._badge = 0
 
     def __repr__(self):
         return f"<Room {self.name}>"
@@ -319,11 +313,13 @@ class Room(Connection, EventHandler):
 
     @property
     def badge(self):
-        if not self._badge:
+        badge_val = self.session.badge
+
+        if not badge_val:
             return 0
-        elif self._badge == 1:
+        elif badge_val == 1:
             return MessageFlags.SHOW_MOD_ICON.value
-        elif self._badge == 2:
+        elif badge_val == 2:
             return MessageFlags.SHOW_STAFF_ICON.value
         else:
             return 0
@@ -367,7 +363,7 @@ class Room(Connection, EventHandler):
 
     @property
     def user(self):
-        return self._user
+        return self.session.user
 
     @property
     def mods(self):
@@ -392,9 +388,7 @@ class Room(Connection, EventHandler):
     @property
     def alluserlist(self):
         """Lista de todos los usuarios en la sala (con anons)"""
-        return sorted(
-            [x[1] for x in list(self._userdict.values())], key=lambda z: z.name.lower()
-        )
+        return sorted([s.user for s in self._userdict.values()], key=lambda z: z.name)
 
     @classmethod
     def assert_valid_name(cls, room_name: str):
@@ -424,8 +418,7 @@ class Room(Connection, EventHandler):
         """
         Force this room to disconnect
         """
-        for x in self.userlist:
-            x.removeSessionId(self, 0)
+        self._userdict.clear()
         self.reconnect = False
         await self._disconnect()
 
@@ -455,13 +448,22 @@ class Room(Connection, EventHandler):
         """
         Login when joining a room
         """
-        await self.send_command("bauth", self.name, self._uid, user_name, password)
+        if user_name:
+            self.session.user = UserManager.get_user(name=user_name)
+        await self.send_command(
+            "bauth", self.name, self.session.session_id or "", user_name, password
+        )
 
     async def _login(self, user_name: str = "", password: str = ""):
         """
         Login after having connected as anon
         """
-        self._user = User(user_name, isanon=not password)
+        if password:
+            self.session.user = UserManager.get_user(name=user_name)
+        else:
+            self.session.user = UserManager.get_user(
+                name=user_name, aid=self.session.short_cookie
+            )
         await self.send_command("blogin", user_name, password)
 
     async def _logout(self):
@@ -499,24 +501,10 @@ class Room(Connection, EventHandler):
     async def disable_bg(self):
         await self.set_bg_mode(0)
 
-    def get_session_list(self, mode=0, memory=0):  # TODO
-        if mode < 2:
-            return [
-                (x.name if mode else x, len(x.getSessionIds(self)))
-                for x in self._get_user_list(1, memory)
-            ]
-        else:
-            return [
-                (x.showname, len(x.getSessionIds(self)))
-                for x in self._get_user_list(1, memory)
-            ]
-
     def _get_user_list(self, unique=1, memory=0, anons=False):
         ul = []
         if not memory:
-            ul = [
-                x[1] for x in self._userdict.copy().values() if anons or not x[1].isanon
-            ]
+            ul = [s.user for s in self._userdict.values() if anons or not s.user.isanon]
         elif type(memory) == int:
             ul = set(
                 map(
@@ -526,11 +514,11 @@ class Room(Connection, EventHandler):
             )
         if unique:
             ul = set(ul)
-        return sorted(list(ul), key=lambda x: x.name.lower())
+        return sorted(list(ul), key=lambda x: x.name)
 
     def get_level(self, user):
         if isinstance(user, str):
-            user = User(user)
+            user = UserManager.get_user(name=user)
         if user == self.owner:
             return 3
         if user in self._mods:
@@ -541,25 +529,23 @@ class Room(Connection, EventHandler):
         return 0
 
     def ban_record(self, user):
-        if isinstance(user, User):  # TODO
-            user = user.name
-        if user.lower() in [x.name for x in self._banlist]:
-            return self._banlist[User(user)]
-        return None
+        if isinstance(user, str):
+            user = UserManager.get_user(name=user)
+        return self._banlist.get(user)
 
     def get_last_message(self, user=None):
         """Obtener el último mensaje de un usuario en una sala"""
         if not user:
             return self._history and self._history[-1] or None
-        if isinstance(user, User):
-            user = user.name
+        if isinstance(user, str):
+            user = UserManager.get_user(name=user)
         for x in reversed(self.history):
-            if x.user.name == user:
+            if x.user == user:
                 return x
         return None
 
-    async def _raw_unban(self, name, ip, unid):
-        await self.send_command("removeblock", unid, ip, name)
+    async def _raw_unban(self, name, ip, encoded_cookie):
+        await self.send_command("removeblock", encoded_cookie, ip, name)
 
     def _add_history(self, msg):
         if len(self._history) == self.history.maxlen:
@@ -584,27 +570,27 @@ class Room(Connection, EventHandler):
         rec = self.ban_record(user)
         print("rec", rec)
         if rec:
-            await self._raw_unban(rec.target.name, rec.ip, rec.unid)
+            await self._raw_unban(rec.target.name, rec.ip, rec.encoded_cookie)
             return True
         else:
             return False
 
-    async def ban_message(self, msg: Message) -> bool:
+    async def ban_message(self, msg: RoomMessage) -> bool:
         if self.get_level(self.user) > 0:
             name = "" if msg.user.isanon else msg.user.name
-            await self._raw_ban(msg.unid, msg.ip, name)
+            await self._raw_ban(msg.encoded_cookie, msg.ip, name)
             return True
         return False
 
-    async def _raw_ban(self, msgid, ip, name):
+    async def _raw_ban(self, encoded_cookie, ip, name):
         """
         Ban user with received data
-        @param msgid: Message id
+        @param encoded_cookie: Encoded cookie
         @param ip: user IP
         @param name: chatango user name
         @return: bool
         """
-        await self.send_command("block", msgid, ip, name)
+        await self.send_command("block", encoded_cookie, ip, name)
 
     async def ban_user(self, user: str) -> bool:
         """
@@ -635,7 +621,7 @@ class Room(Connection, EventHandler):
             msg = self.get_last_message(user)
             if msg:
                 name = "" if msg.user.isanon else msg.user.name
-                await self.send_command("delallmsg", msg.unid, msg.ip, name)
+                await self.send_command("delallmsg", msg.encoded_cookie, msg.ip, name)
                 return True
         return False
 
@@ -656,7 +642,7 @@ class Room(Connection, EventHandler):
         await self.send_command(
             "blocklist",
             "unblock",
-            str(int(time.time() + self._correctiontime)),
+            str(int(time.time() + self.session.correction_time)),
             "next",
             "500",
             "anons",
@@ -667,7 +653,7 @@ class Room(Connection, EventHandler):
         await self.send_command(
             "blocklist",
             "block",
-            str(int(time.time() + self._correctiontime)),
+            str(int(time.time() + self.session.correction_time)),
             "next",
             "500",
             "anons",
@@ -701,7 +687,7 @@ class Room(Connection, EventHandler):
         await self.request_banlist()
         await self.request_unbanlist()
         if self.user.ispremium:
-            await self._style_init(self._user)
+            await self._style_init(self.user)
 
     async def set_bg_mode(self, mode):
         self._bgmode = mode
@@ -718,43 +704,65 @@ class Room(Connection, EventHandler):
                 name_color="000000", font_color="000000", font_size=11, font_face=1
             )
 
-    async def _rcmd_ok(self, args):  # TODO
-        self.owner = User(args[0])
-        self._puid = args[1]
-        self._login_as = args[2]
-        self._currentname = args[3]
-        self._connectiontime = args[4]
-        self._correctiontime = int(float(self._connectiontime) - time.time())
-        self._currentIP = args[5]
-        self._flags = RoomFlags(int(args[7]))
+    async def _rcmd_ok(self, args):
+        """
+        Processes the 'ok' command which signals successful connection and
+        provides room/user metadata.
+
+        Format: ok:OWNER:COOKIE:LOGIN_AS:CURRENT_NAME:CONN_TIME:IP:MODS:FLAGS
+        """
+        if len(args) < 8:
+            return
+
+        owner_name = args[0]
+        session_id = args[1]
+        login_status = args[2]
+        current_name = args[3]
+        ts_id = args[4]
+        ip = args[5]
+        mods_str = args[6]
+        flags_str = args[7]
+
+        # 1. Resolve current User
+        if login_status == "M":
+            user = UserManager.get_user(name=current_name)
+            await self._style_init(user)
+        else:
+            # Guest: Create a stub user, identity will be discovered in gparticipants
+            user = UserManager.get_user()
+
+        # 2. Update Room and Session State
+        self.owner = UserManager.get_user(name=owner_name)
+        self.session.user = user
+        self.session.session_id = session_id
+        self.session.ts_id = ts_id
+        self.session.ip = ip
+        self.session.conn_time = ts_id
+        self.session.correction_time = int(float(ts_id) - time.time())
+        user.addSession(self.session)
+        self._userdict[session_id] = self.session
+
+        self._flags = RoomFlags(int(flags_str))
+
+        # 3. Initialize Mods
+        self._mods = dict()
+        if mods_str:
+            for mod_record in mods_str.split(";"):
+                if "," in mod_record:
+                    name, power = mod_record.split(",")
+                    mod_user = UserManager.get_user(name=name)
+                    mflags = ModeratorFlags(int(power))
+                    self._mods[mod_user] = mflags
+
         await self.load_profile()
-        if self._login_as == "C":
-            uname = get_anon_name(
-                str(self._correctiontime).split(".")[0][-4:].replace("-", ""),
-                self._puid,
-            )
-            self._user = User(uname, isanon=True, ip=self._currentIP)
-        elif self._login_as == "M":
-            self._user = User(self._currentname, puid=self._puid, ip=self._currentIP)
-            await self._style_init(self._user)
-        elif self._login_as == "N":
-            pass
-        for mod in args[6].split(";"):
-            if len(mod.split(",")) > 1:
-                mod, power = mod.split(",")
-                self._mods[User(mod)] = ModeratorFlags(int(power))
-                self._mods[User(mod)].isadmin = (
-                    ModeratorFlags(int(power)) & AdminFlags != 0
-                )
         self.call_event("ready")
 
     async def _rcmd_inited(self, args):
         await self._reload()
 
     async def _rcmd_pwdok(self, args):
-        self._user._isanon = False
         await self.send_command("getpremium", "l")
-        await self._style_init(self._user)
+        await self._style_init(self.user)
 
     async def _rcmd_annc(self, args):
         self._announcement[0] = int(args[0])
@@ -789,7 +797,7 @@ class Room(Connection, EventHandler):
     async def _rcmd_premium(self, args):
         code = args[0]
         is_prem = code in ["200", "210"] or (self.owner == self.user)
-        self.user._ispremium = is_prem
+        self.user.ispremium = is_prem
         if is_prem and self._bgmode:
             await self.send_command("msgbg", str(self._bgmode))
 
@@ -807,97 +815,153 @@ class Room(Connection, EventHandler):
         await self._rcmd_g_participants(len(args) > 1 and args[1:] or "")
 
     async def _rcmd_g_participants(self, args):
+        """
+        Processes the 'gparticipants' command which provides a full list of
+        all participants in the room.
+
+        Format: gparticipants:numAnons:SESSIONID:TIME:COOKIE:NAME:ALIAS:IP;...
+        """
         self._userdict = dict()
-        args = ":".join(args).split(";")  # return if not args
-        for data in args:
-            data = data.split(":")  # Lista de un solo usuario
+        if not args:
+            return
+
+        # args[0] is numAnons
+        self._usercount = int(args[0])
+
+        raw_list = ":".join(args[1:])
+        if not raw_list:
+            self.call_event("participants")
+            return
+
+        for record in raw_list.split(";"):
+            data = record.split(":")
+            if len(data) < 6:
+                continue
+
             ssid = data[0]
-            contime = data[1]  # Hora de conexión a la sala
-            puid = data[2]
+            contime = data[1]
+            cookie = data[2]
             name = data[3]
             tname = data[4]
-            isanon = False
-            if str(name) == "None":
-                isanon = True
-                if str(tname) != "None":
-                    name = tname
-                else:
-                    name = get_anon_name(contime, puid)
-            user = User(name, isanon=isanon, puid=puid)
-            if user in ({self.owner} | self.mods):
-                user.setName(name)
-            user.addSessionId(self, ssid)
-            self._userdict[ssid] = [contime, user]
+            ip = data[5]
+
+            is_anon = name == "None"
+            is_temp = is_anon and tname != "None"
+
+            if not is_anon:
+                # Registered user: identified by name
+                user = UserManager.get_user(name=name)
+            elif is_temp:
+                # Temporary user: identified by cookie (aid), display tname
+                user = UserManager.get_user(name=tname, aid=cookie)
+            else:
+                # Anonymous user: identified by cookie (aid)
+                user = UserManager.get_user(aid=cookie)
+
+            # Identity Discovery: If this is our connection, resolve our full identity
+            if ssid == self.session.session_id:
+                self.session.short_cookie = cookie
+                self.session.ip = ip
+                self.session.user = user
+                session = self.session
+            else:
+                session = Session(
+                    user=user,
+                    room=self,
+                    session_id=ssid,
+                    short_cookie=cookie,
+                    ip=ip,
+                    conn_time=contime,
+                )
+
+            user.addSession(session)
+            self._userdict[ssid] = session
+
         self.call_event("participants")
 
     async def _rcmd_participant(self, args):
-        cambio = args[0]  # Leave Join Change
-        ssid = args[1]  # session
-        puid = args[2]  # UID
-        name = args[3]  # username
-        tname = args[4]  # Anon Name
-        unknown = args[5]  # ip
-        contime = args[6]  # time
-        isanon = False
-        if name == "None":
-            if tname != "None":
-                name = tname
-            else:
-                name = get_anon_name(contime, puid)
-            isanon = True
-        user = User(name, isanon=isanon, puid=puid, ip=unknown)
-        user.setName(name)
-        before = None
-        if ssid in self._userdict:
-            before = self._userdict[ssid][1]
-        if cambio == "0":  # Leave
-            user.removeSessionId(self, ssid)
+        """
+        Processes the 'participant' command which signals a single user
+        joining, leaving, or changing authentication status.
+
+        Format: participant:STATUS:SESSIONID:COOKIE:NAME:ALIAS:IP:TIME
+        """
+        if len(args) < 7:
+            return
+
+        status = args[0]  # 0=Leave, 1=Join, 2=Auth Change
+        ssid = args[1]
+        cookie = args[2]
+        name = args[3]
+        tname = args[4]
+        ip = args[5]
+        contime = args[6]
+
+        is_anon = name == "None"
+        is_temp = is_anon and tname != "None"
+
+        if not is_anon:
+            # Registered user: identified by name
+            user = UserManager.get_user(name=name)
+        elif is_temp:
+            # Temporary user: identified by cookie (aid), display tname
+            user = UserManager.get_user(name=tname, aid=cookie)
+        else:
+            # Anonymous user: identified by cookie (aid)
+            user = UserManager.get_user(aid=cookie)
+
+        before_session = self._userdict.get(ssid)
+        before = before_session.user if before_session else None
+
+        if status == "0":  # Leave
+            if before_session:
+                before.removeSession(before_session)
             if ssid in self._userdict:
-                usr = self._userdict.pop(ssid)[1]
-                lista = [x[1] for x in self._userhistory]
-                if usr not in lista:
-                    self._userhistory.append([contime, usr])
-                else:
-                    self._userhistory.remove(
-                        [x for x in self._userhistory if x[1] == usr][0]
-                    )
-                    self._userhistory.append([contime, usr])
+                self._userdict.pop(ssid)
+
             if user.isanon:
-                self.call_event("anon_leave", user, puid)
+                self.call_event("anon_leave", user)
             else:
-                self.call_event("leave", user, puid)
-        elif cambio == "1" or not before:  # Join
-            user.addSessionId(self, ssid)
-            if not user.isanon and user not in self.userlist:
-                self.call_event("join", user, puid)
-            elif user.isanon:
-                self.call_event("anon_join", user, puid)
-            self._userdict[ssid] = [contime, user]
-            lista = [x[1] for x in self._userhistory]
-            if user in lista:
-                self._userhistory.remove(
-                    [x for x in self._userhistory if x[1] == user][0]
-                )
-        else:  # TODO
-            if before.isanon:  # Login
+                self.call_event("leave", user)
+
+        elif status == "1" or not before:  # Join
+            session = Session(
+                user=user,
+                room=self,
+                session_id=ssid,
+                short_cookie=cookie,
+                ip=ip,
+                conn_time=contime,
+            )
+            user.addSession(session)
+            self._userdict[ssid] = session
+
+            if user.isanon:
+                self.call_event("anon_join", user)
+            else:
+                self.call_event("join", user)
+
+        elif status == "2":  # Auth Change (Login/Logout)
+            if before_session:
+                before.removeSession(before_session)
+            session = Session(
+                user=user,
+                room=self,
+                session_id=ssid,
+                short_cookie=cookie,
+                ip=ip,
+                conn_time=contime,
+            )
+            user.addSession(session)
+            self._userdict[ssid] = session
+
+            if before and before.isanon:  # Login
                 if user.isanon:
-                    self.call_event("anon_login", before, user, puid)
+                    self.call_event("anon_login", before, user)
                 else:
-                    self.call_event("user_login", before, user, puid)
-            elif not before.isanon:  # Logout
-                if before in self.userlist:
-                    lista = [x[1] for x in self._userhistory]
-
-                    if before not in lista:
-                        self._userhistory.append([contime, before])
-                    else:
-                        lst = [x for x in self._userhistory if before == x[1]]
-                        if lst:
-                            self._userhistory.remove(lst[0])
-                        self._userhistory.append([contime, before])
-                    self.call_event("user_logout", before, user, puid)
-
-            self._userdict[ssid] = [contime, user]
+                    self.call_event("user_login", before, user)
+            elif before:  # Logout
+                self.call_event("user_logout", before, user)
 
     async def _rcmd_mods(self, args):
         pre = self._mods
@@ -912,10 +976,10 @@ class Room(Connection, EventHandler):
         # Load current mods
         for mod in args:
             name, powers = mod.split(",", 1)
-            utmp = User(name)
+            utmp = UserManager.get_user(name=name)
             self._mods[utmp] = ModeratorFlags(int(powers))
             self._mods[utmp].isadmin = ModeratorFlags(int(powers)) & AdminFlags != 0
-        tuser = User(self._currentname)
+        tuser = UserManager.get_user(name=self._currentname)
         if (self.user not in pre and self.user in mods) or (
             tuser not in pre and tuser in mods
         ):
@@ -943,65 +1007,124 @@ class Room(Connection, EventHandler):
         self._flags = RoomFlags(int(flags))
         self.call_event("group_flags")
 
-    async def _rcmd_blocked(self, args):  # TODO
-        target = args[2] and User(args[2]) or ""
-        user = User(args[3])
-        if not target:
-            msx = [msg for msg in self._history if msg.unid == args[0]]
-            target = msx and msx[0].user or User("ANON")
-            self.call_event("anon_ban", user, target)
+    async def _rcmd_blocked(self, args):
+        encoded_cookie = args[0]
+        ip = args[1]
+        name = args[2]
+        moderator = UserManager.get_user(name=args[3])
+        time_stamp = float(args[4])
+
+        if name == "":
+            msx = [msg for msg in self._history if msg.encoded_cookie == encoded_cookie]
+            target = msx[0].user if msx else UserManager.get_user(aid=None)
+            self.call_event("anon_ban", target, moderator)
         else:
-            self.call_event("ban", user, target)
+            target = UserManager.get_user(name=name)
+            self.call_event("ban", target, moderator)
+
         self._banlist[target] = self._BANDATA(
-            args[0], args[1], target, float(args[4]), user
+            encoded_cookie, ip, target, time_stamp, moderator
         )
 
-    async def _rcmd_blocklist(self, args):  # TODO
+    async def _rcmd_blocklist(self, args):
         self._banlist = dict()
         sections = ":".join(args).split(";")
         for section in sections:
             params = section.split(":")
             if len(params) != 5:
                 continue
-            if params[2] == "":
-                continue
-            user = User(params[2])
+
+            encoded_cookie = params[0]
+            ip = params[1]
+            name = params[2]
+            time_stamp = float(params[3])
+            moderator = UserManager.get_user(name=params[4])
+
+            if name == "":
+                user = UserManager.get_user(aid=encoded_cookie)
+            else:
+                user = UserManager.get_user(name=name)
+
             self._banlist[user] = self._BANDATA(
-                params[0], params[1], user, float(params[3]), User(params[4])
+                encoded_cookie, ip, user, time_stamp, moderator
             )
         self.call_event("banlist_update")
 
     async def _rcmd_unblocked(self, args):
-        """Unban event"""
-        unid = args[0]
-        ip = args[1]
-        target = args[2].split(";")[0]
-        # bnsrc = args[-3]
-        ubsrc = User(args[-2])
-        time = args[-1]
-        self._unbanqueue.append(self._BANDATA(unid, ip, target, float(time), ubsrc))
-        if target == "":
-            msx = [msg for msg in self._history if msg.unid == unid]
-            target = msx and msx[0].user or User("anon", isanon=True)
-            self.call_event("anon_unban", ubsrc, target)
-        else:
-            target = User(target)
-            if target in self._banlist:
-                self._banlist.pop(target)
-            self.call_event("unban", ubsrc, target)
+        """
+        Processes the 'unblocked' command which signals one or more users
+        have been unbanned.
+
+        Format: unblocked:COOKIE:IP:NAME;COOKIE:IP:NAME;...
+        """
+        raw_data = ":".join(args)
+
+        for record in raw_data.split(";"):
+            r_parts = record.split(":")
+            if len(r_parts) < 3:
+                continue
+
+            cookie, ip, name = r_parts[0], r_parts[1], r_parts[2]
+
+            # 1. Resolve Target User
+            if name == "":
+                target = UserManager.get_user(aid=cookie)
+                event_name = "anon_unban"
+            else:
+                target = UserManager.get_user(name=name)
+                event_name = "unban"
+
+            # 2. Clean up _banlist
+            # Search by cookie first
+            found = False
+            for u, data in list(self._banlist.items()):
+                if data.encoded_cookie == cookie:
+                    self._banlist.pop(u)
+                    found = True
+                    break
+
+            # Fallback: Search by IP if not found by cookie
+            if not found:
+                for u, data in list(self._banlist.items()):
+                    if data.ip == ip:
+                        # For registered users, also match the name
+                        if not name or u.name == name.lower():
+                            self._banlist.pop(u)
+                            break
+
+            # 3. Trigger Event (target only)
+            self.call_event(event_name, target)
 
     async def _rcmd_unblocklist(self, args):
-        sections = ":".join(args).split(";")
-        for section in sections[::-1]:
-            params = section.split(":")
+        """
+        Processes the 'unblocklist' command which provides the history of unbanned users.
+
+        Format: unblocklist:COOKIE:IP:NAME:TIMESTAMP:MODERATOR;...
+        """
+        raw_data = ":".join(args)
+        if not raw_data:
+            return
+
+        for record in raw_data.split(";"):
+            params = record.split(":")
             if len(params) != 5:
                 continue
-            unid = params[0]
+
+            cookie = params[0]
             ip = params[1]
-            target = User(params[2] or "Anon")
-            time = float(params[3])
-            src = User(params[4])
-            self._unbanqueue.append(self._BANDATA(unid, ip, target, time, src))
+            name = params[2]
+            time_stamp = float(params[3])
+            moderator = UserManager.get_user(name=params[4])
+
+            if name == "":
+                target = UserManager.get_user(aid=cookie)
+            else:
+                target = UserManager.get_user(name=name)
+
+            self._unbanqueue.append(
+                self._BANDATA(cookie, ip, target, time_stamp, moderator)
+            )
+
         self.call_event("unbanlist_update")
 
     async def _rcmd_clearall(self, args):
@@ -1012,7 +1135,7 @@ class Room(Connection, EventHandler):
         await self.disconnect()
 
     async def _rcmd_updatemoderr(self, args):
-        self.call_event("mod_update_error", User(args[1]), args[0])
+        self.call_event("mod_update_error", UserManager.get_user(name=args[1]), args[0])
 
     async def _rcmd_proxybanned(self, args):
         self.call_event("proxy_banned")
@@ -1032,7 +1155,7 @@ class Room(Connection, EventHandler):
         self.call_event("group_info_update")
 
     async def _rcmd_miu(self, args):
-        user = User(args[0])
+        user = UserManager.get_user(name=args[0])
         await user.load_resources()
         self.call_event("bg_reload", user)
 
@@ -1107,20 +1230,29 @@ class Room(Connection, EventHandler):
     async def _rcmd_logoutfirst(self, args):
         pass
 
-    async def _rcmd_logoutok(self, args, Force=False):
-        """Me he desconectado, ahora usaré mi nombre de anon"""
-        name = get_anon_name(str(self._correctiontime).split(".")[0][-4:], self._puid)
-        self._user = User(name, isanon=True, ip=self._currentIP)
-        # TODO fail aquiCLOSE
-        self.call_event("logout", self._user, "?")
+    async def _rcmd_logoutok(self, args):
+        """
+        Processes the 'logoutok' command which signals that the user has
+        successfully logged out and reverted to anonymous status.
+        """
+        if not self.session:
+            return
+
+        # Revert to anonymous status using the cookie (aid) from the session
+        new_user = UserManager.get_user(
+            aid=self.session.short_cookie, ip=self.session.ip
+        )
+
+        self.session.user = new_user
+        self.call_event("logout", new_user)
 
     async def _rcmd_updateprofile(self, args):
         """Cuando alguien actualiza su perfil en un chat"""
-        user = User(args[0])
+        user = UserManager.get_user(name=args[0])
         user._profile = None
         self.call_event("profile_changes", user)
 
     async def _rcmd_reload_profile(self, args):
-        user = User(args[0])
+        user = UserManager.get_user(name=args[0])
         user._profile = None
         self.call_event("profile_reload", user)

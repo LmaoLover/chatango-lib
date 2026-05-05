@@ -29,6 +29,7 @@ class Client(TaskHandler):
         room_class=Room,
         pm_class=PM,
     ):
+        super().__init__()
         self._room_class = room_class
         self._pm_class = pm_class
         self.running = False
@@ -72,14 +73,11 @@ class Client(TaskHandler):
         self.add_task(self._watch_pm())
 
     async def _watch_pm(self):
-        if self._pm_class is PM or issubclass(self._pm_class, PM):
-            pm = self._pm_class()
-            pm.add_listener(self)
-            self.pm = pm
-            await pm.listen(self.username, self.password, reconnect=True)
-            self.pm = None
-        else:
-            raise TypeError("Client: custom PM class does not inherit from PM")
+        pm = self._pm_class()
+        pm.add_listener(self)
+        self.pm = pm
+        await pm.listen(self.username, self.password, reconnect=True)
+        self.pm = None
 
     def leave_pm(self):
         if self.pm:
@@ -89,22 +87,17 @@ class Client(TaskHandler):
         Room.assert_valid_name(room_name)
         if room_name in self.rooms:
             logger.error(f"Already joined room {room_name}")
-            # Attempt to reconnect existing room?
             return
 
         self.add_task(self._watch_room(room_name))
 
     async def _watch_room(self, room_name: str):
-        if self._room_class is Room or issubclass(self._room_class, Room):
-            room = self._room_class(room_name)
-            room.add_listener(self)
-            room.add_listener(ConnectionListener(self))
-            self.rooms[room_name] = room
-            await room.listen(self.username, self.password, reconnect=True)
-            # Client level reconnect?
-            self.rooms.pop(room_name, None)
-        else:
-            raise TypeError("Client: custom room class does not inherit from Room")
+        room = self._room_class(room_name)
+        room.add_listener(self)
+        room.add_listener(ConnectionListener(self))
+        self.rooms[room_name] = room
+        await room.listen(self.username, self.password, reconnect=True)
+        self.rooms.pop(room_name, None)
 
     def leave_room(self, room_name: str):
         room = self.rooms.get(room_name)
@@ -115,7 +108,7 @@ class Client(TaskHandler):
         if self.pm:
             self.leave_pm()
 
-        for room_name in self.rooms:
+        for room_name in list(self.rooms.keys()):
             self.leave_room(room_name)
 
     connection_check_timeout = 5
@@ -127,7 +120,8 @@ class Client(TaskHandler):
             )
         except asyncio.TimeoutError:
             problem_rooms = set(self.initial_rooms) - set(self.initial_rooms_connected)
-            logger.error(f"Failed to connect: {', '.join(problem_rooms)}")
+            if problem_rooms:
+                logger.error(f"Failed to connect: {', '.join(problem_rooms)}")
             self.add_task(self.on_started())
 
     async def connection_checker(self):

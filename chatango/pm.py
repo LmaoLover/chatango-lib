@@ -1,97 +1,38 @@
 import time
 import asyncio
-from typing import Optional
+import logging
+from typing import Optional, List, Dict
 
 from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
 from .handler import CommandHandler, EventHandler
+from .connection import WebsocketConnection
 from .user import User, Friend, UserManager, Session
 from .message import _process_pm, message_cut
 
+logger = logging.getLogger(__name__)
 
-class Socket(CommandHandler):
+
+class PM(WebsocketConnection, EventHandler):
+    """
+    Modern WebSocket-based Private Messaging (PM) implementation.
+    """
+
     def __init__(self):
-        self._reset()
-
-    def _reset(self):
-        self._connected = False
-        self._first_command = True
-        self._recv: Optional[asyncio.StreamReader] = None
-        self._connection: Optional[asyncio.StreamWriter] = None
-        self._recv_task: Optional[asyncio.Task] = None
-        self._ping_task: Optional[asyncio.Task] = None
-
-    @property
-    def connected(self):
-        return self._connected
-
-    async def _connect(self, server: str, port: int):
-        self._recv, self._connection = await asyncio.open_connection(server, port)
-        self._connected = True
-        self._recv_task = asyncio.create_task(self._do_recv())
-        self._ping_task = asyncio.create_task(self._do_ping())
-
-    async def _disconnect(self):
-        if self._ping_task:
-            self._ping_task.cancel()
-        if self._connection:
-            self._connection.close()
-            await self._connection.wait_closed()
-        self._reset()
-
-    async def _send_command(self, command, terminator="\r\n\0"):
-        if self._first_command:
-            terminator = "\x00"
-            self._first_command = False
-        else:
-            terminator = "\r\n\0"
-        message = command + terminator
-        if self._connection:
-            self._connection.write(message.encode())
-            await self._connection.drain()
-
-    async def _do_ping(self):
-        """
-        Ping the socket every minute to keep alive
-        """
-        while True:
-            await asyncio.sleep(90)
-            if self.connected:
-                await self._send_command("\r\n", terminator="\x00")
-
-    async def _do_recv(self):
-        """
-        Receive and process data from the socket
-        """
-        while self._recv:
-            data: bytes = await self._recv.read(2048)
-            if self.connected and data:
-                data_str: str = data.decode()
-                if data_str != "\r\n\x00":  # pong
-                    cmds = data_str.split("\r\n\x00")
-                    for cmd in cmds:
-                        await self._receive_command(cmd)
-            else:
-                break
-            await asyncio.sleep(0.0001)
-        await self._disconnect()
-
-
-class PM(Socket, EventHandler):
-    def __init__(self):
-        super().__init__()
+        WebsocketConnection.__init__(self)
+        EventHandler.__init__(self)
         self.server = "c1.chatango.com"
-        self.port = 443
+        self.port = 8081
         self.session: Session = Session(room=self, user=UserManager.get_user())
         self.reconnect = False
         self.__token = None
 
-        # misc
+        # internal state
         self._uid = gen_uid()
         self._silent = 0
         self._maxlen = 11600
-        self._friends = dict()
-        self._blocked = list()
+        self._friends: Dict[str, Friend] = dict()
+        self._blocked: List[User] = list()
         self._premium = False
         self._history = list()
 
@@ -130,22 +71,46 @@ class PM(Socket, EventHandler):
         return list(self._friends.keys())
 
     async def connect(self, user_name: str, password: str):
+        """
+        The complete PM handshake workflow written sequentially.
+        """
         if self.connected:
             raise AlreadyConnectedError(self.name)
-        await self._connect(self.server, self.port)
-        await self._login(user_name, password)
 
-    async def _login(self, user_name: str, password: str):
-        if not self.__token:
-            self.__token = await get_token(user_name, password)
-        if self.__token:
-            await self.send_command("tlogin", self.__token, "2", self._uid)
+        await self._connect(f"wss://{self.server}:{self.port}/")
+
+        try:
+            if not self.__token:
+                self.__token = await get_token(user_name, password)
+
+            if not self.__token:
+                raise ConnectionError(
+                    "Authentication failed: could not retrieve auth token."
+                )
+
+            handshake_args = ["tlogin", self.__token, "2"]
+            if self.session.session_id:
+                handshake_args.append(self.session.session_id)
+
+            ok_args = await self.send_command(
+                *handshake_args, expect="OK", timeout=10.0, terminator="\x00"
+            )
             self.session.user = UserManager.get_user(user_name)
 
-    async def connection_wait(self):
-        if self._recv_task:
-            await self._recv_task
-        self.call_event("pm_disconnect")
+            if ok_args:
+                self.session.session_id = ok_args[0]
+
+            await self.send_command("wl")
+            await self.send_command("getblock")
+            await self.send_command("settings")
+
+            self.call_event("connect")
+            logger.info("PM successfully connected and initialized.")
+
+        except (TimeoutError, ConnectionError) as e:
+            logger.error(f"PM Handshake failed: {e}")
+            await self.disconnect()
+            raise
 
     async def disconnect(self):
         self.reconnect = False
@@ -154,8 +119,14 @@ class PM(Socket, EventHandler):
     async def listen(self, user_name: str, password: str, reconnect=False):
         self.reconnect = reconnect
         while True:
-            await self.connect(user_name, password)
-            await self.connection_wait()
+            try:
+                await self.connect(user_name, password)
+                while self.connected:
+                    await asyncio.sleep(1)
+                self.call_event("disconnect")
+            except Exception as e:
+                logger.error(f"Error in PM listen loop: {e}")
+
             if not self.reconnect:
                 break
             await asyncio.sleep(3)
@@ -166,188 +137,196 @@ class PM(Socket, EventHandler):
         if isinstance(target, User):
             target = target.name
         if self._silent > time.time():
-            self.call_event("pm_silent", message)
-        else:
-            if len(message) > 0:
-                message = message  # format_videos(self.user, message)
-                for msg in message_cut(message, self._maxlen):
-                    msg = f'{self.user.styles.get_name_tag()}<m v="1"><g xs0="0">{self.user.styles.format_message(msg, is_pm=True)}</g></m>'
-                    await self.send_command("msg", target.lower(), msg)
+            self.call_event("toofast", message)
+            return
 
-    async def block(self, user):  # TODO
-        if isinstance(user, User):
-            user = user.name
-        if user not in self._blocked:
-            await self.send_command("block", user, user, "S")
-            self._blocked.append(UserManager.get_user(user))
-            self.call_event("pm_block", UserManager.get_user(user))
+        if len(message) > 0:
+            for msg in message_cut(message, self._maxlen):
+                # PM format often uses <m v="1"><g xs0="0"> wrapper
+                msg_payload = f'{self.user.styles.get_name_tag()}<m v="1"><g xs0="0">{self.user.styles.format_message(msg, is_pm=True)}</g></m>'
+                await self.send_command("msg", target.lower(), msg_payload)
 
-    async def unblock(self, user):
-        if isinstance(user, User):
-            user = user.name
-        if user in self._blocked:
-            await self.send_command("unblock", user)
-            self.call_event("pm_unblock", UserManager.get_user(user))
-            return True
+    # --- Command Handlers ---
 
-    def get_friend(self, user):
-        if isinstance(user, User):
-            user = user.name
-        if user.lower() in self.friends:
-            return self._friends[user]
-        return None
-
-    def _add_to_history(self, args):
-        if len(self.history) >= 10000:
-            self._history = self._history[1:]
-        self._history.append(args)
-
-    async def enable_bg(self):
-        await self.send_command("msgbg", "1")
-
-    async def disable_bg(self):
-        await self.send_command("msgbg", "0")
-
-    async def addfriend(self, user_name):
-        user = user_name
-        friend = self.get_friend(user)
-        if not friend:
-            await self.send_command("wladd", user_name.lower())
-
-    async def unfriend(self, user_name):
-        user = user_name
-        friend = self.get_friend(user)
-        if friend:
-            await self.send_command("wldelete", friend.name)
-
-    async def _rcmd_seller_name(self, args):
-        self.call_event("pm_connect")
+    async def _rcmd_OK(self, args):
+        pass
 
     async def _rcmd_premium(self, args):
         if args and args[0] == "210":
             self._premium = True
+            await self.enable_bg()
         else:
             self._premium = False
-        if self.premium:
-            await self.enable_bg()
 
     async def _rcmd_time(self, args):
         conn_time = args[0]
         self.session.conn_time = conn_time
+        # Convert ms to seconds if needed, but chatango correction_time usually expects float
         self.session.correction_time = int(float(conn_time) - time.time())
 
     async def _rcmd_kickingoff(self, args):
-        self.call_event("pm_kickingoff", args)
+        self.call_event("kickingoff")
         self.__token = None
-        await self._disconnect()
+        await self.disconnect()
 
     async def _rcmd_DENIED(self, args):
-        self.call_event("pm_denied", args)
+        self.call_event("DENIED")
         self.__token = None
-        await self._disconnect()
-
-    async def _rcmd_OK(self, args):
-        if self.friends or self.blocked:
-            self.friends.clear()
-            self.blocked.clear()
-
-        # Update session (cookie and IP are not provided in PM OK)
-        self.session.conn_time = str(time.time() + self.session.correction_time)
-
-        await self.send_command("getpremium")
-        await self.send_command("wl")
-        await self.send_command("getblock")
+        await self.disconnect()
 
     async def _rcmd_toofast(self, args):
-        self._silent = time.time() + 12  # seconds to wait
-        self.call_event("pm_toofast")
+        self._silent = time.time() + 12
+        self.call_event("toofast")
 
     async def _rcmd_msglexceeded(self, args):
-        self.call_event("pm_msglexceeded")
+        self.call_event("msglexceeded")
 
     async def _rcmd_msg(self, args):
+        # msg:msg_id:sender_handle:timestamp:message_content
         msg = await _process_pm(self, args)
         self._add_to_history(msg)
-        self.call_event("pm_message", msg)
+        self.call_event("msg", msg)
 
     async def _rcmd_msgoff(self, args):
+        # msgoff:msg_id:sender_handle:timestamp:message_content
         msg = await _process_pm(self, args)
-        msg._offline = True
+        msg.msgoff = True
         self._add_to_history(msg)
-
-    async def _rcmd_wlapp(self, args):
-        pass
-
-    async def _rcmd_wloffline(self, args):
-        pass
-
-    async def _rcmd_wlonline(self, args):
-        pass
+        self.call_event("msgoff", msg)
 
     async def _rcmd_wl(self, args):
-        # Restart contact list
         self._friends.clear()
-        # Iterate over each contact
-        for i in range(len(args) // 4):
-            name, last_on, is_on, idle = args[i * 4 : i * 4 + 4]
+        # Modern WL format is just colon-separated fields consumed 4 by 4
+        # uid, last_logout, status, idle_mins
+        for i in range(0, len(args), 4):
+            chunk = args[i : i + 4]
+            if len(chunk) < 4:
+                break
+
+            name, last_on, status, idle = chunk
             user = UserManager.get_user(name)
             friend = Friend(user, self)
-            if last_on == "None":
-                last_on = 0
-            if is_on in ["off", "offline"]:
+
+            if status in ["off", "offline"]:
                 friend._status = "offline"
-            elif is_on in ["on", "online"]:
+            elif status in ["on", "online"]:
                 friend._status = "online"
-            elif is_on in ["app"]:
+            elif status in ["app"]:
                 friend._status = "app"
-            friend._check_status(float(last_on), None, int(idle))
-            self._friends[str(user.name)] = friend
+
+            friend._check_status(
+                float(last_on) if last_on != "None" else 0, None, int(idle)
+            )
+            self._friends[user.name] = friend
+            # Tracking ensures we get real-time presence updates
             await self.send_command("track", user.name)
 
-    async def _rcmd_track(self, args):
-        friend = self._friends[args[0]] if args[0] in self.friends else None
-        if friend:
-            friend._idle = False
-            if args[2] == "online":
-                friend._last_active = time.time() - (int(args[1]) * 60)
-            elif args[2] == "offline":
-                friend._last_active = float(args[1])
-            if args[1] in ["0"] and args[2] in ["app"]:
-                friend._status = "app"
-            else:
-                friend._status = args[2]
+        self.call_event("wl")
 
-    async def _rcmd_idleupdate(self, args):
-        friend = self._friends[args[0]] if args[0] in self.friends else None
+    async def _rcmd_wlonline(self, args):
+        friend = self._friends.get(args[0].lower())
         if friend:
+            friend._status = "online"
             friend._last_active = time.time()
-            friend._idle = True if args[1] == "0" else False
+            self.call_event("wlonline", friend)
 
-    async def _rcmd_status(self, args):
-        friend = self._friends[args[0]] if args[0] in self.friends else None
-        if friend == None:
-            return
-        status = True if args[2] == "online" else False
-        friend._check_status(float(args[1]), status, 0)
-        self.call_event(f"pm_contact_{args[2]}", friend)
+    async def _rcmd_wloffline(self, args):
+        friend = self._friends.get(args[0].lower())
+        if friend:
+            friend._status = "offline"
+            self.call_event("wloffline", friend)
 
-    async def _rcmd_block_list(self, args):
-        self.call_event("pm_block_list")
+    async def _rcmd_wlapp(self, args):
+        friend = self._friends.get(args[0].lower())
+        if friend:
+            friend._status = "app"
+            self.call_event("wlapp", friend)
 
     async def _rcmd_wladd(self, args):
-        if args[1] == "invalid":
-            return
-        friend = self._friends[args[0]] if args[0] in self.friends else None
-        if not friend:
-            friend = Friend(UserManager.get_user(args[0]), self)
-            self._friends[args[0]] = friend
-            self.call_event("pm_contact_addfriend", friend)
-            await self.send_command("wl")
-            await self.send_command("track", args[0].lower())
+        name = args[0]
+        user = UserManager.get_user(name)
+        friend = Friend(user, self)
+        self._friends[user.name] = friend
+        self.call_event("wladd", friend)
+        await self.send_command("track", user.name)
 
     async def _rcmd_wldelete(self, args):
-        if args[1] == "deleted":
-            friend = args[0]
-            if friend in self._friends:
-                del self._friends[friend]
-                self.call_event("pm_contact_unfriend", args[0])
+        name = args[0].lower()
+        if name in self._friends:
+            friend = self._friends.pop(name)
+            self.call_event("wldelete", friend)
+
+    async def _rcmd_idleupdate(self, args):
+        # idleupdate:user_handle:state
+        name = args[0].lower()
+        state = args[1]
+        friend = self._friends.get(name)
+        if friend:
+            friend._idle = state == "1"
+            friend._last_active = time.time()
+            self.call_event("idleupdate", friend)
+
+    async def _rcmd_presence(self, args):
+        # presence:data
+        self.call_event("presence", args)
+
+    async def _rcmd_block_list(self, args):
+        # block_list:list_data (semicolon separated)
+        raw_list = ":".join(args)
+        self._blocked = [
+            UserManager.get_user(name) for name in raw_list.split(";") if name
+        ]
+        self.call_event("block_list")
+
+    async def _rcmd_unblocked(self, args):
+        name = args[0].lower()
+        self._blocked = [u for u in self._blocked if u.name != name]
+        self.call_event("unblocked", UserManager.get_user(name))
+
+    async def _rcmd_settings(self, args):
+        # settings:settings_json
+        self.call_event("settings", args[0])
+
+    async def _rcmd_seller_name(self, args):
+        # seller_name:name[:session_id]
+        if len(args) > 1:
+            self.session.session_id = args[1]
+        self.call_event("seller_name", args[0])
+
+    async def _rcmd_reload_profile(self, args):
+        user = UserManager.get_user(name=args[0])
+        self.call_event("reload_profile", user)
+
+    # --- Helper methods ---
+
+    async def add_friend(self, user):
+        name = user.name if isinstance(user, User) else str(user)
+        return await self.send_command("wladd", name)
+
+    async def remove_friend(self, user):
+        name = user.name if isinstance(user, User) else str(user)
+        return await self.send_command("wldelete", name)
+
+    async def block(self, user):
+        name = user.name if isinstance(user, User) else str(user)
+        # Format: block:handle:handle:user_type
+        # user_type "1" is generally used for registered users in ranchat
+        return await self.send_command("block", name, name, "1")
+
+    async def unblock(self, user):
+        name = user.name if isinstance(user, User) else str(user)
+        return await self.send_command("unblock", name, name, "1")
+
+    def get_friend(self, name: str) -> Optional[Friend]:
+        return self._friends.get(name.lower())
+
+    def _add_to_history(self, msg):
+        self._history.append(msg)
+        if len(self._history) > 1000:
+            self._history.pop(0)
+
+    async def enable_bg(self):
+        return await self.send_command("setsettings", "disable_msg_bg", "off")
+
+    async def disable_bg(self):
+        return await self.send_command("setsettings", "disable_msg_bg", "on")

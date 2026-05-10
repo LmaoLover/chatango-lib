@@ -84,6 +84,7 @@ class Message:
 class PMMessage(Message):
     def __init__(self):
         super().__init__()
+        self.id = None
         self.msgoff = False
         self.flags = str(0)
 
@@ -133,18 +134,31 @@ async def _process(room, args):
     return msg
 
 
-async def _process_pm(room, args):
-    name = args[0] or args[1]
-    if not name:
-        name = args[2]
-    user = UserManager.get_user(name=name)
-    mtime = float(args[3]) - room.session.correction_time
-    rawmsg = ":".join(args[5:])
+async def _process_pm(pm, args):
+    """
+    Process incoming private message.
+    ranchat format: msg:chat_id:uid_cookie:?:ts:flags:content
+    """
+    chat_id = args[0]
+    uid_cookie = args[1]
+    # args[2] is ?
+    timestamp = float(args[3]) - pm.session.correction_time
+    flags = int(args[4])
+    body = ":".join(args[5:])
+
     msg = PMMessage()
-    msg.room = room
-    msg.user = user
-    msg.time = mtime
-    msg.raw = rawmsg
+    msg.room = pm
+
+    if chat_id.startswith("*"):
+        # Anon
+        sender = chat_id
+    else:
+        # Registered
+        sender = chat_id
+
+    msg.user = UserManager.get_user(name=sender)
+    msg.time = timestamp
+    msg.raw = body
     msg.body = msg._clean_body_text
     return msg
 

@@ -7,7 +7,6 @@ from .pm import PM
 from .room import Room
 from .utils import public_attributes
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -15,8 +14,11 @@ class ConnectionListener:
     def __init__(self, client):
         self.client = client
 
-    async def on_connect(self, room):
-        self.client.initial_rooms_connected.append(room.name)
+    async def on_connect(self, obj):
+        if obj.is_pm:
+            self.client.pm_connected = True
+        else:
+            self.client.initial_rooms_connected.append(obj.name)
 
 
 class Client(TaskHandler):
@@ -36,6 +38,7 @@ class Client(TaskHandler):
         self.rooms: Dict[str, Room] = {}
         self.pm: Optional[PM] = None
         self.use_pm = pm
+        self.pm_connected = False
         self.initial_rooms: List[str] = rooms
         self.initial_rooms_connected: List[str] = []
         self.username = username
@@ -75,6 +78,7 @@ class Client(TaskHandler):
     async def _watch_pm(self):
         pm = self._pm_class()
         pm.add_listener(self)
+        pm.add_listener(ConnectionListener(self))
         self.pm = pm
         await pm.listen(self.username, self.password, reconnect=True)
         self.pm = None
@@ -122,11 +126,15 @@ class Client(TaskHandler):
             problem_rooms = set(self.initial_rooms) - set(self.initial_rooms_connected)
             if problem_rooms:
                 logger.error(f"Failed to connect: {', '.join(problem_rooms)}")
+            if self.use_pm and not self.pm_connected:
+                logger.error(f"Failed to connect to PM")
             self.add_task(self.on_started())
 
     async def connection_checker(self):
         while True:
-            if set(self.initial_rooms) == set(self.initial_rooms_connected):
+            rooms_ready = set(self.initial_rooms) == set(self.initial_rooms_connected)
+            pm_ready = not self.use_pm or self.pm_connected
+            if rooms_ready and pm_ready:
                 self.add_task(self.on_started())
                 break
             await asyncio.sleep(0.1)

@@ -138,19 +138,34 @@ def trace():
     trace_config.on_request_exception.append(on_request_exception)
     return trace_config
 
+
 _aiohttp_session = None
+
 
 def get_aiohttp_session():
     global _aiohttp_session
     if _aiohttp_session is None:
-        # Chatango uses "legacy" connect method
+        # Chatango uses legacy TLS configurations on some server ports (e.g. PM 8081)
+        # We must lower the security level to allow negotiation with these hosts.
         ssl_context = ssl.create_default_context()
+
         # 0x4 is the underlying OpenSSL value for OP_LEGACY_SERVER_CONNECT
+        # This allows connecting to servers that don't support RFC 5746 (renegotiation)
         ssl_context.options |= 0x4
+
+        # Lower security level to 1 to allow older ciphers/hashes used by Chatango
+        try:
+            ssl_context.set_ciphers("DEFAULT@SECLEVEL=1")
+        except ssl.SSLError:
+            # Fallback if SECLEVEL is not supported by the system's OpenSSL
+            pass
+
         connector = aiohttp.TCPConnector(ssl=ssl_context)
 
         timeout = aiohttp.ClientTimeout(total=30, connect=10)
-        _aiohttp_session = aiohttp.ClientSession(connector=connector, timeout=timeout, trace_configs=[trace()])
+        _aiohttp_session = aiohttp.ClientSession(
+            connector=connector, timeout=timeout, trace_configs=[trace()]
+        )
     return _aiohttp_session
 
 

@@ -5,7 +5,6 @@ import traceback
 from collections.abc import Iterable
 from typing import Coroutine
 
-
 logger = logging.getLogger(__name__)
 
 """
@@ -212,7 +211,8 @@ provide implementation for _send_command which sends the command out on
 the network.
 
 The method _receive_command parses the command format, and will automatically
-call a method handler named _rcmd_{action}:
+call a method handler named _rcmd_{action}.  It also supports Request-Response
+multiplexing via the expect_command method.
 
  Command:
    premium:0:12345678
@@ -227,6 +227,43 @@ call a method handler named _rcmd_{action}:
 
 class CommandHandler:
     """
+    Registry for mapping expected message IDs/types to asyncio.Futures
+    """
+
+    def __init__(self):
+        self._pending_waiters = {}
+
+    """
+    Returns an awaitable that resolves when the server sends a command
+    matching 'action'.
+    """
+
+    def expect_command(self, action: str, timeout: float = 10.0):
+        loop = asyncio.get_running_loop()
+        fut = loop.create_future()
+        if action not in self._pending_waiters:
+            self._pending_waiters[action] = []
+        self._pending_waiters[action].append(fut)
+        return self._expect_command_internal(action, fut, timeout)
+
+    """
+    Internal awaitable for expect_command
+    """
+
+    async def _expect_command_internal(
+        self, action: str, fut: asyncio.Future, timeout: float
+    ):
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        finally:
+            # Cleanup this specific future from the registry
+            if action in self._pending_waiters:
+                if fut in self._pending_waiters[action]:
+                    self._pending_waiters[action].remove(fut)
+                if not self._pending_waiters[action]:
+                    del self._pending_waiters[action]
+
+    """
     Internal method to send a command using the protocol of the
     subclass (websocket, tcp, etc.)
     """
@@ -235,16 +272,28 @@ class CommandHandler:
         raise TypeError("CommandHandler child class must implement _send_command")
 
     """
-    Public send method
+    Public send method. If 'expect' is provided, it returns the server's
+    response for that matching command.
     """
 
-    async def send_command(self, *args):
-        command = ":".join(args)
+    async def send_command(
+        self, *args, expect: str = None, timeout: float = 10.0, **kwargs
+    ):
+        waiter = None
+        if expect:
+            waiter = self.expect_command(expect, timeout)
+
+        command = ":".join(str(a) for a in args)
         logger.debug(f"OUT {command}")
-        await self._send_command(command)
+        await self._send_command(command, **kwargs)
+
+        if waiter:
+            return await waiter
 
     """
-    Receive an incoming command and dynamically call a handler
+    Receive an incoming command and dynamically call a handler.
+    First checks for sequential waiters before calling the dynamic
+    method handler.
     """
 
     async def _receive_command(self, command: str):
@@ -252,6 +301,16 @@ class CommandHandler:
             return
         logger.debug(f" IN {command}")
         action, *args = command.split(":")
+
+        # 1. Resolve all waiters for this action
+        if action in self._pending_waiters:
+            # Pop the entire list to clear expectations immediately
+            waiters = self._pending_waiters.pop(action)
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(args)
+
+        # 2. Dynamic Dispatch
         if hasattr(self, f"_rcmd_{action}"):
             try:
                 await getattr(self, f"_rcmd_{action}")(args)
@@ -260,3 +319,16 @@ class CommandHandler:
                 traceback.print_exception(e, file=sys.stderr)
         else:
             logger.error(f"Unhandled received command {action}")
+
+    """
+    Release any workflows waiting for a response if the connection drops.
+    """
+
+    def _cancel_all_pending_futures(self, reason: Exception = None):
+        exc = reason or ConnectionError("Connection closed unexpectedly.")
+        for action in list(self._pending_waiters.keys()):
+            waiters = self._pending_waiters.pop(action)
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_exception(exc)
+        self._pending_waiters.clear()

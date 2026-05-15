@@ -2,11 +2,15 @@ import re
 import time
 import enum
 import html
-from typing import Optional
+from typing import Optional, Union, TYPE_CHECKING
 
 from .utils import public_attributes
 from .user import User, UserManager
 from .resources import Styles
+
+if TYPE_CHECKING:
+    from .pm import PM
+    from .room import Room
 
 
 class MessageFlags(enum.IntFlag):
@@ -41,9 +45,9 @@ Fonts = {
 
 
 class Message:
-    def __init__(self):
-        self.user: Optional[User] = None
-        self.room = None
+    def __init__(self, user, room):
+        self.user: User = user
+        self.room: Union[Room, PM] = room
         self.time = 0.0
         self.body = str()
         self.raw = str()
@@ -82,16 +86,16 @@ class Message:
 
 
 class PMMessage(Message):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, user, room):
+        super().__init__(user, room)
         self.id = None
         self.msgoff = False
         self.flags = str(0)
 
 
 class RoomMessage(Message):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, user, room):
+        super().__init__(user, room)
         self.id = None
         self.short_cookie = str()
         self.ip = str()
@@ -104,8 +108,17 @@ async def _process(room, args):
     _time = float(args[0]) - room.session.correction_time
     name, tname, aid, encoded_cookie, msgid, ip, flags = args[1:8]
     body = ":".join(args[9:])
-    msg = RoomMessage()
-    msg.room = room
+
+    if name:
+        # Registered User
+        user = UserManager.get_user(name=name)
+    else:
+        # Anonymous or Temporary User
+        n_match = re.search(r"<n(\d{4})/?\s*>", body)
+        n = n_match.group(1) if n_match else "3452"
+        user = UserManager.get_user(name=tname, aid=aid, display_id=n)
+
+    msg = RoomMessage(user, room)
     msg.time = float(_time)
     msg.short_cookie = str(aid)
     msg.id = msgid
@@ -113,15 +126,6 @@ async def _process(room, args):
     msg.ip = ip
     msg.raw = body
     msg.body = msg._clean_body_text
-
-    if name:
-        # Registered User
-        msg.user = UserManager.get_user(name=name)
-    else:
-        # Anonymous or Temporary User
-        n_match = re.search(r"<n(\d{4})/?\s*>", msg.raw)
-        n = n_match.group(1) if n_match else "3452"
-        msg.user = UserManager.get_user(name=tname, aid=aid, display_id=n)
 
     msg.flags = MessageFlags(int(flags))
     ispremium = MessageFlags.PREMIUM in msg.flags
@@ -137,7 +141,7 @@ async def _process(room, args):
 async def _process_pm(pm, args):
     """
     Process incoming private message.
-    ranchat format: msg:chat_id:uid_cookie:?:ts:flags:content
+    Format: msg:chat_id:uid_cookie:?:ts:flags:content
     """
     chat_id = args[0]
     uid_cookie = args[1]
@@ -146,17 +150,15 @@ async def _process_pm(pm, args):
     flags = int(args[4])
     body = ":".join(args[5:])
 
-    msg = PMMessage()
-    msg.room = pm
-
     if chat_id.startswith("*"):
         # Anon
         sender = chat_id
     else:
         # Registered
         sender = chat_id
+    user = UserManager.get_user(name=sender)
 
-    msg.user = UserManager.get_user(name=sender)
+    msg = PMMessage(user, pm)
     msg.time = timestamp
     msg.raw = body
     msg.body = msg._clean_body_text

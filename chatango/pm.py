@@ -310,7 +310,7 @@ class PM(WebsocketConnection, EventHandler):
     async def block(self, user):
         name = user.name if isinstance(user, User) else str(user)
         # Format: block:handle:handle:user_type
-        # user_type "1" is generally used for registered users in ranchat
+        # user_type "1" is generally used for registered users
         return await self.send_command("block", name, name, "1")
 
     async def unblock(self, user):

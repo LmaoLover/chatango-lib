@@ -4,7 +4,7 @@ import time
 import enum
 import re
 import logging
-import urllib.request as urlreq
+import urllib.parse as urlreq
 
 from collections import deque, namedtuple
 from typing import Optional
@@ -15,7 +15,7 @@ from .utils import (
     public_attributes,
 )
 from .message import MessageFlags, RoomMessage, _process, message_cut
-from .user import User, ModeratorFlags, AdminFlags, UserManager, Session
+from .user import RegisteredUser, User, ModeratorFlags, AdminFlags, UserManager, Session
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
 from .handler import EventHandler
@@ -77,7 +77,8 @@ class Room(WebsocketConnection, EventHandler):
         self._banlist = dict()
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)
-        self._usercount = 0
+        self._usercount: Optional[int] = None
+        self._anoncount: Optional[int] = None
         self._maxlen = 2800
         self._bgmode = 0
         self._nomore = False
@@ -170,24 +171,25 @@ class Room(WebsocketConnection, EventHandler):
 
     @property
     def userlist(self):
-        return self._get_user_list()
+        if self._anoncount is not None:
+            return [s.user for s in self._userdict.values()]
+        else:
+            raise AttributeError(
+                "User list not available, first send the gparticipants command"
+            )
 
     @property
-    def anonlist(self):
-        """Lista de anons detectados"""
-        return list(set(self.alluserlist) - set(self.userlist))
-
-    @property
-    def usercount(self):  # TODO
-        """Len users -> user count"""
-        if self._flags and RoomFlags.NO_COUNTER in self._flags:
-            return len(self.alluserlist)
-        return self._usercount
-
-    @property
-    def alluserlist(self):
-        """Lista de todos los usuarios en la sala (con anons)"""
-        return sorted([s.user for s in self._userdict.values()], key=lambda z: z.name)
+    def usercount(self):
+        if self._usercount is not None:
+            return self._usercount
+        elif self._anoncount is not None:
+            return self._anoncount + len(
+                [u for u in self.userlist if isinstance(u, RegisteredUser)]
+            )
+        else:
+            raise AttributeError(
+                "User list not available, first send the gparticipants command"
+            )
 
     @classmethod
     def assert_valid_name(cls, room_name: str):
@@ -205,9 +207,11 @@ class Room(WebsocketConnection, EventHandler):
         await self._connect(f"wss://{self.server}:8081/")
 
         try:
-            await self.send_command("v", expect="v", timeout=5.0)
+            await self.send_command("v", terminator="\x00", expect="v", timeout=5.0)
 
-            ok_args = await self._auth(user_name, password, expect="ok", timeout=10.0)
+            ok_args = await self._auth(
+                user_name, password, terminator="\x00", expect="ok", timeout=10.0
+            )
             await self._rcmd_ok(ok_args)
             self.call_event("ready")
 
@@ -302,7 +306,7 @@ class Room(WebsocketConnection, EventHandler):
             for msg in message_cut(msg, self._maxlen):
                 is_anon = self.user.isanon
                 styled_msg = f"{self.user.styles.get_name_tag(is_anon)}{self.user.styles.format_message(msg, is_anon=is_anon)}"
-                await self.send_command("bm", _id_gen(), str(message_flags), styled_msg)
+                await self.send_command("bm", _id_gen(), int(message_flags), styled_msg)
 
     def set_font(
         self, name_color=None, font_color=None, font_size=None, font_face=None
@@ -322,47 +326,34 @@ class Room(WebsocketConnection, EventHandler):
     async def disable_bg(self):
         await self.set_bg_mode(0)
 
-    def _get_user_list(self, unique=1, memory=0, anons=False):
-        ul = []
-        if not memory:
-            ul = [s.user for s in self._userdict.values() if anons or not s.user.isanon]
-        elif type(memory) == int:
-            ul = set(
-                map(
-                    lambda x: x.user,
-                    list(self._history)[min(-memory, len(self._history)) :],
-                )
-            )
-        if unique:
-            ul = set(ul)
-        return sorted(list(ul), key=lambda x: x.name)
-
     def get_level(self, user):
         if isinstance(user, str):
             user = UserManager.get_user(name=user)
         if user == self.owner:
             return 3
-        if user in self._mods:
-            if self._mods.get(user).isadmin:
-                return 2
-            else:
-                return 1
-        return 0
+        mod_user = self._mods.get(user)
+        if not mod_user:
+            return 0
+        elif mod_user.isadmin:
+            return 2
+        else:
+            return 1
 
     def ban_record(self, user):
         if isinstance(user, str):
             user = UserManager.get_user(name=user)
         return self._banlist.get(user)
 
-    def get_last_message(self, user=None):
-        """Obtener el último mensaje de un usuario en una sala"""
+    def get_last_message(self, user=None) -> Optional[RoomMessage]:
+        if not self._history:
+            return None
         if not user:
-            return self._history and self._history[-1] or None
+            return self._history[-1]
         if isinstance(user, str):
             user = UserManager.get_user(name=user)
-        for x in reversed(self.history):
-            if x.user == user:
-                return x
+        for msg in reversed(self.history):
+            if msg.user == user:
+                return msg
         return None
 
     async def _raw_unban(self, name, ip, encoded_cookie):
@@ -491,13 +482,13 @@ class Room(WebsocketConnection, EventHandler):
         """
         if self.user in self._mods and ModeratorFlags.EDIT_BW in self._mods[self.user]:
             await self.send_command(
-                "setbannedwords", urlreq.quote(part), urlreq.quote(whole)
+                "\x00setbannedwords", urlreq.quote(part), urlreq.quote(whole)
             )
             return True
         return False
 
-    async def _reload(self):
-        """Requests initial state data from server without waiting for response."""
+    async def _request_initial_data(self):
+        """Requests initial state data from server."""
         await self.send_command("getpremium", "l")
         await self.send_command("getannouncement")
         await self.send_command("getbannedwords")
@@ -506,10 +497,6 @@ class Room(WebsocketConnection, EventHandler):
         await self.request_unbanlist()
         if self.user.ispremium:
             await self._style_init(self.user)
-
-    async def _request_initial_data(self):
-        """Requests initial state data from server."""
-        await self._reload()
 
     async def request_participants(self):
         """Enables participant mode."""
@@ -604,8 +591,6 @@ class Room(WebsocketConnection, EventHandler):
         self.session.ip = ip
         self.session.conn_time = ts_id
         self.session.correction_time = int(float(ts_id) - time.time())
-        user.addSession(self.session)
-        self._userdict[session_id] = self.session
 
         self._flags = RoomFlags(int(flags_str))
 
@@ -636,7 +621,6 @@ class Room(WebsocketConnection, EventHandler):
         pass
 
     async def _rcmd_n(self, args):
-        """user count"""
         self._usercount = int(args[0], 16)
 
     async def _rcmd_i(self, args):
@@ -672,60 +656,36 @@ class Room(WebsocketConnection, EventHandler):
 
         Format: gparticipants:numAnons:SESSIONID:TIME:COOKIE:NAME:ALIAS:IP;...
         """
+        self._anoncount = int(args[0])
         self._userdict = dict()
-        if not args:
-            return
-
-        # args[0] is numAnons
-        self._usercount = int(args[0])
 
         raw_list = ":".join(args[1:])
-        if not raw_list:
-            self.call_event("participants")
-            return
-
         for record in raw_list.split(";"):
             data = record.split(":")
-            if len(data) < 6:
-                continue
 
             ssid = data[0]
             contime = data[1]
             cookie = data[2]
-            name = data[3]
-            alias = data[4]
-            ip = data[5]
+            name = data[3] if data[3] != "None" else None
+            alias = data[4] if data[4] != "None" else None
+            ip = data[5] or None
 
-            is_anon = name == "None"
-            is_temp = is_anon and alias != "None"
-
-            if not is_anon:
-                # Registered user: identified by name
+            if name:
                 user = UserManager.get_user(name=name)
-            elif is_temp:
-                # Temporary user: identified by cookie (aid), display alias
+            elif alias:
                 user = UserManager.get_user(name=alias, aid=cookie)
             else:
-                # Anonymous user: identified by cookie (aid)
                 user = UserManager.get_user(aid=cookie)
 
-            # Identity Discovery: If this is our connection, resolve our full identity
-            if ssid == self.session.session_id:
-                self.session.short_cookie = cookie
-                self.session.ip = ip
-                self.session.user = user
-                session = self.session
-            else:
-                session = Session(
-                    user=user,
-                    room=self,
-                    session_id=ssid,
-                    short_cookie=cookie,
-                    ip=ip,
-                    conn_time=contime,
-                )
-
-            user.addSession(session)
+            session = Session(
+                user=user,
+                room=self,
+                session_id=ssid,
+                short_cookie=cookie,
+                ip=ip,
+                conn_time=contime,
+            )
+            user.add_session(session)
             self._userdict[ssid] = session
 
         self.call_event("participants")
@@ -737,82 +697,59 @@ class Room(WebsocketConnection, EventHandler):
 
         Format: participant:STATUS:SESSIONID:COOKIE:NAME:ALIAS:IP:TIME
         """
-        if len(args) < 7:
-            return
-
-        status = args[0]  # 0=Leave, 1=Join, 2=Auth Change
+        status = args[0]
         ssid = args[1]
         cookie = args[2]
-        name = args[3]
-        alias = args[4]
-        ip = args[5]
+        name = args[3] if args[3] != "None" else None
+        alias = args[4] if args[4] != "None" else None
+        ip = args[5] or None
         contime = args[6]
 
-        is_anon = name == "None"
-        is_temp = is_anon and alias != "None"
-
-        if not is_anon:
-            # Registered user: identified by name
+        if name:
             user = UserManager.get_user(name=name)
-        elif is_temp:
-            # Temporary user: identified by cookie (aid), display alias
+        elif alias:
             user = UserManager.get_user(name=alias, aid=cookie)
         else:
-            # Anonymous user: identified by cookie (aid)
             user = UserManager.get_user(aid=cookie)
 
-        before_session = self._userdict.get(ssid)
-        before = before_session.user if before_session else None
+        session = Session(
+            user=user,
+            room=self,
+            session_id=ssid,
+            short_cookie=cookie,
+            ip=ip,
+            conn_time=contime,
+        )
+        user.add_session(session)
+        self._userdict[ssid] = session
 
         if status == "0":  # Leave
-            if before_session:
-                before.removeSession(before_session)
-            if ssid in self._userdict:
-                self._userdict.pop(ssid)
+            self._userdict.pop(ssid)
 
             if user.isanon:
-                self.call_event("anon_leave", user)
-            else:
-                self.call_event("leave", user)
+                if self._anoncount:
+                    self._anoncount -= 1
 
-        elif status == "1" or not before:  # Join
-            session = Session(
-                user=user,
-                room=self,
-                session_id=ssid,
-                short_cookie=cookie,
-                ip=ip,
-                conn_time=contime,
-            )
-            user.addSession(session)
-            self._userdict[ssid] = session
+            self.call_event("leave", user)
 
+        elif status == "1":  # Join
             if user.isanon:
-                self.call_event("anon_join", user)
-            else:
-                self.call_event("join", user)
+                if self._anoncount:
+                    self._anoncount += 1
+
+            self.call_event("join", user)
 
         elif status == "2":  # Auth Change (Login/Logout)
-            if before_session:
-                before.removeSession(before_session)
-            session = Session(
-                user=user,
-                room=self,
-                session_id=ssid,
-                short_cookie=cookie,
-                ip=ip,
-                conn_time=contime,
-            )
-            user.addSession(session)
-            self._userdict[ssid] = session
+            if name:
+                if self._anoncount:
+                    self._anoncount -= 1
 
-            if before and before.isanon:  # Login
-                if user.isanon:
-                    self.call_event("anon_login", before, user)
-                else:
-                    self.call_event("user_login", before, user)
-            elif before:  # Logout
-                self.call_event("user_logout", before, user)
+            if name or alias:
+                self.call_event("login", user)
+            else:
+                if self._anoncount:
+                    self._anoncount += 1
+                self.call_event("logout", user)
 
     async def _rcmd_mods(self, args):
         pre = self._mods
@@ -995,7 +932,7 @@ class Room(WebsocketConnection, EventHandler):
         """Borrar un mensaje de mi vista actual"""
         msg = self._remove_history(args[0])
         if msg:
-            self.call_event("delete", [msg])
+            self.call_event("delete", msg)
         #
         if len(self._history) < 20 and not self._nomore:
             await self.send_command("get_more", "20", "0")
@@ -1005,7 +942,7 @@ class Room(WebsocketConnection, EventHandler):
         msgs_nones = [self._remove_history(msgid) for msgid in args]
         msgs = [msg for msg in msgs_nones if msg]
         if msgs:
-            self.call_event("delete", msgs)
+            self.call_event("deleteall", msgs)
 
     # Receive banned word lists from server
     async def _rcmd_bw(self, args):
@@ -1068,15 +1005,9 @@ class Room(WebsocketConnection, EventHandler):
         self.call_event("logoutok", new_user)
 
     async def _rcmd_updateprofile(self, args):
-        """Cuando alguien actualiza su perfil en un chat"""
         user = UserManager.get_user(name=args[0])
-        user._profile = None
-        self.call_event("profile_changes", user)
-
-    async def _rcmd_reload_profile(self, args):
-        user = UserManager.get_user(name=args[0])
-        user._profile = None
-        self.call_event("profile_reload", user)
+        await user.load_resources()
+        self.call_event("updateprofile", user)
 
     # --- Documented Protocol Stubs ---
 

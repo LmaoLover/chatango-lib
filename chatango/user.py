@@ -1,7 +1,7 @@
 import enum
 import time
 import weakref
-from typing import Any, Optional, Dict, Type
+from typing import Any, Optional, Type, Union, TYPE_CHECKING
 from collections import deque
 
 from .utils import public_attributes
@@ -12,6 +12,10 @@ from .resources import (
     UserProfile,
     MessageBackground,
 )
+
+if TYPE_CHECKING:
+    from .pm import PM
+    from .room import Room
 
 
 class ModeratorFlags(enum.IntFlag):
@@ -70,7 +74,7 @@ class User:
     def __init__(self, **kwargs):
         self._flags = 0
         self._history = deque(maxlen=5)
-        self._sessions = weakref.WeakSet()  # set(Session)
+        self._sessions = weakref.WeakSet()
         self._ispremium = None
         self._client = None
         self._showname = kwargs.get("showname")
@@ -179,18 +183,14 @@ class User:
     def istemp(self):
         return isinstance(self, TemporaryUser)
 
-    def addSession(self, session):
+    def add_session(self, session):
         self._sessions.add(session)
 
-    def getSessions(self, room=None):
+    def get_sessions(self, room=None):
         if room:
             return {s for s in self._sessions if s.room == room}
         else:
             return set(self._sessions)
-
-    def removeSession(self, session):
-        if session in self._sessions:
-            self._sessions.remove(session)
 
 
 class RegisteredUser(User):
@@ -321,8 +321,8 @@ class Session:
 
     def __init__(
         self,
-        user: Optional[User] = None,
-        room: Optional[Any] = None,
+        user: User,
+        room: Union["Room", "PM"],
         session_id: Optional[str] = None,
         short_cookie: Optional[str] = None,
         encoded_cookie: Optional[str] = None,
@@ -330,12 +330,12 @@ class Session:
         ip: Optional[str] = None,
         conn_time: Optional[str] = None,
         correction_time: int = 0,
-        badge: int = 0
+        badge: int = 0,
     ):
         self.user = user
         self.room = room
         self.session_id = session_id  # SSID
-        self.short_cookie = short_cookie # AID
+        self.short_cookie = short_cookie  # AID
         self.encoded_cookie = encoded_cookie
         self.ts_id = ts_id
         self.ip = ip
@@ -354,7 +354,9 @@ class UserManager:
     _users = weakref.WeakValueDictionary()
 
     def __init__(self):
-        raise RuntimeError("UserManager cannot be instantiated. Use UserManager.get_user() instead.")
+        raise RuntimeError(
+            "UserManager cannot be instantiated. Use UserManager.get_user() instead."
+        )
 
     @classmethod
     def get_user(
@@ -397,7 +399,7 @@ class UserManager:
             if isinstance(user, AnonymousUser):
                 if "display_id" in kwargs:
                     user._display_id = str(kwargs["display_id"])
-            
+
             # Unified name update
             if name:
                 user._showname = name

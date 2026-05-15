@@ -3,7 +3,7 @@ import asyncio
 import logging
 import traceback
 from collections.abc import Iterable
-from typing import Coroutine
+from typing import Coroutine, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +277,7 @@ class CommandHandler:
     """
 
     async def send_command(
-        self, *args, expect: str = None, timeout: float = 10.0, **kwargs
+        self, *args, expect: Optional[str] = None, timeout: float = 10.0, **kwargs
     ):
         waiter = None
         if expect:
@@ -324,7 +324,7 @@ class CommandHandler:
     Release any workflows waiting for a response if the connection drops.
     """
 
-    def _cancel_all_pending_futures(self, reason: Exception = None):
+    def _cancel_all_pending_futures(self, reason: Optional[Exception] = None):
         exc = reason or ConnectionError("Connection closed unexpectedly.")
         for action in list(self._pending_waiters.keys()):
             waiters = self._pending_waiters.pop(action)

@@ -191,6 +191,15 @@ class Room(WebsocketConnection, EventHandler):
                 "User list not available, first send the gparticipants command"
             )
 
+    @property
+    def anoncount(self):
+        if self._anoncount is not None:
+            return self._anoncount
+        else:
+            raise AttributeError(
+                "User list not available, first send the gparticipants command"
+            )
+
     @classmethod
     def assert_valid_name(cls, room_name: str):
         expr = re.compile("^([a-z0-9-]{1,20})$")
@@ -209,11 +218,9 @@ class Room(WebsocketConnection, EventHandler):
         try:
             await self.send_command("v", terminator="\x00", expect="v", timeout=5.0)
 
-            ok_args = await self._auth(
+            await self._auth(
                 user_name, password, terminator="\x00", expect="ok", timeout=10.0
             )
-            await self._rcmd_ok(ok_args)
-            self.call_event("ready")
 
             if self.user.isanon:
                 await self.send_command("msgbg", "0")
@@ -563,9 +570,6 @@ class Room(WebsocketConnection, EventHandler):
 
         Format: ok:OWNER:COOKIE:LOGIN_AS:CURRENT_NAME:CONN_TIME:IP:MODS:FLAGS
         """
-        if len(args) < 8:
-            return
-
         owner_name = args[0]
         session_id = args[1]
         login_status = args[2]
@@ -605,6 +609,7 @@ class Room(WebsocketConnection, EventHandler):
                     self._mods[mod_user] = mflags
 
         await self.load_profile()
+        self.call_event("ok")
 
     async def _rcmd_inited(self, args):
         self.call_event("inited")

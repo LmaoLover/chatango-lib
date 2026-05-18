@@ -302,15 +302,7 @@ class CommandHandler:
         logger.debug(f" IN {command}")
         action, *args = command.split(":")
 
-        # 1. Resolve all waiters for this action
-        if action in self._pending_waiters:
-            # Pop the entire list to clear expectations immediately
-            waiters = self._pending_waiters.pop(action)
-            for fut in waiters:
-                if not fut.done():
-                    fut.set_result(args)
-
-        # 2. Dynamic Dispatch
+        # Handle callback, modify internal state first
         if hasattr(self, f"_rcmd_{action}"):
             try:
                 await getattr(self, f"_rcmd_{action}")(args)
@@ -319,6 +311,14 @@ class CommandHandler:
                 traceback.print_exception(e, file=sys.stderr)
         else:
             logger.error(f"Unhandled received command {action}")
+
+        # Resolve all waiters for this action
+        if action in self._pending_waiters:
+            # Pop the entire list to clear expectations immediately
+            waiters = self._pending_waiters.pop(action)
+            for fut in waiters:
+                if not fut.done():
+                    fut.set_result(args)
 
     """
     Release any workflows waiting for a response if the connection drops.

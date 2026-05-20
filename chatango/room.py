@@ -53,27 +53,42 @@ class RoomFlags(enum.IntFlag):
 class Room(WebsocketConnection, EventHandler):
     _BANDATA = namedtuple("BanData", ["encoded_cookie", "ip", "target", "time", "src"])
 
-    def __dir__(self):
-        return public_attributes(self)
+    valid_name = re.compile("^([a-z0-9-]{1,20})$")
+
+    command_responses = {
+        "v": "v",
+        "bauth": "ok",
+        "gparticipants": "gparticipants",
+        "updategroupflags": "groupflagstoggled",
+    }
+
+    @classmethod
+    def assert_valid_name(cls, room_name: str):
+        if not Room.valid_name.match(room_name):
+            raise InvalidRoomNameError(room_name)
 
     def __init__(self, name: str):
         WebsocketConnection.__init__(self)
         EventHandler.__init__(self)
+        self._reset_state(name)
+
+    def _reset_state(self, name: str):
         self.assert_valid_name(name)
-        self.name = name
-        self.server = get_server(name)
-        self._profile = RoomProfile()
+        self._name = name
+        self._server = get_server(name)
+        self._owner: Optional[User] = None
+        self._session: Optional[Session] = None
+        self._flags: Optional[RoomFlags] = None
+        self._version: Optional[int] = None
         self.reconnect = False
-        self.owner: Optional[User] = None
-        self._banned_words = ("", "")
-        self.session: Session = Session(room=self, user=UserManager.get_user())
-        self._silent = False
-        self._mods = dict()
-        self._userdict = dict()
+        self.silent = False
+        self.message_flags = 0
         self._mqueue = dict()
         self._uqueue = dict()
         self._messages = dict()
         self._history = deque(maxlen=3000)
+        self._mods = dict()
+        self._userdict = dict()
         self._banlist = dict()
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)
@@ -82,13 +97,56 @@ class Room(WebsocketConnection, EventHandler):
         self._maxlen = 2800
         self._bgmode = 0
         self._nomore = False
-        self.message_flags = 0
+        self._profile = RoomProfile()
+        self._banned_words = ("", "")
         self._announcement = [0, 0, ""]
         self._rate_limit = 0
-        self._flags: Optional[RoomFlags] = None
+
+    def __dir__(self):
+        return public_attributes(self)
 
     def __repr__(self):
         return f"<Room {self.name}>"
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @property
+    def server(self) -> str:
+        return self._server
+
+    @property
+    def owner(self) -> User:
+        if self._owner is not None:
+            return self._owner
+        else:
+            raise AttributeError("Owner not available, room not connected")
+
+    @property
+    def session(self) -> Session:
+        if self._session is not None:
+            return self._session
+        else:
+            raise AttributeError("Session not available, room not connected")
+
+    @property
+    def user(self) -> User:
+        return self.session.user
+
+    @property
+    def flags(self) -> RoomFlags:
+        if self._flags is not None:
+            return self._flags
+        else:
+            raise AttributeError("Flags not available, room not connected")
+
+    @property
+    def version(self) -> int:
+        if self._version is not None:
+            return self._version
+        else:
+            raise AttributeError("Version not available, room not connected")
 
     @property
     def profile(self) -> RoomProfile:
@@ -138,10 +196,6 @@ class Room(WebsocketConnection, EventHandler):
         return self._history
 
     @property
-    def silent(self):
-        return self._silent
-
-    @property
     def description(self):
         return self.profile.group_body_html
 
@@ -154,16 +208,8 @@ class Room(WebsocketConnection, EventHandler):
         return list(self._banlist.keys())
 
     @property
-    def flags(self):
-        return self._flags
-
-    @property
     def rate_limit(self):
         return self._rate_limit
-
-    @property
-    def user(self):
-        return self.session.user
 
     @property
     def mods(self):
@@ -200,52 +246,35 @@ class Room(WebsocketConnection, EventHandler):
                 "User list not available, first send the gparticipants command"
             )
 
-    @classmethod
-    def assert_valid_name(cls, room_name: str):
-        expr = re.compile("^([a-z0-9-]{1,20})$")
-        if not expr.match(room_name):
-            raise InvalidRoomNameError(room_name)
-
-    async def connect(self, user_name: str = "", password: str = ""):
+    async def _connect_server(self):
         """
-        The complete handshake workflow written sequentially.
+        Connect to the websocket server
         """
         if self.connected:
             raise AlreadyConnectedError(self.name)
 
         await self._connect(f"wss://{self.server}:8081/")
-
-        try:
-            await self.send_command("v", terminator="\x00", expect="v", timeout=5.0)
-
-            await self._auth(
-                user_name, password, terminator="\x00", expect="ok", timeout=10.0
-            )
-
-            if self.user.isanon:
-                await self.send_command("msgbg", "0")
-
-            await self._request_initial_data()
-
-        except (TimeoutError, ConnectionError) as e:
-            logger.error(f"Handshake failed for {self.name}: {e}")
-            await self.disconnect()
-            raise
-
-    async def connection_wait(self):
-        """
-        Wait until the connection is closed
-        """
         self.call_event("connect")
+
+    async def _disconnect(self):
+        """
+        Disconnect from the websocket server
+        """
+        await super()._disconnect()
+        self._reset_state(self.name)
+        self.call_event("disconnect")
+
+    async def _connection_wait(self):
+        """
+        Wait until the websocket disconnects
+        """
         if self._recv_task:
             await self._recv_task
-        self.call_event("disconnect")
 
     async def disconnect(self):
         """
         Force this room to disconnect
         """
-        self._userdict.clear()
         self.reconnect = False
         await self._disconnect()
 
@@ -257,13 +286,14 @@ class Room(WebsocketConnection, EventHandler):
 
     async def listen(self, user_name: str = "", password: str = "", reconnect=False):
         """
-        Join and wait on room connection
+        Connect, login, and listen to websocket server
         """
         self.reconnect = reconnect
         while True:
             try:
-                await self.connect(user_name, password)
-                await self.connection_wait()
+                await self._connect_server()
+                await self._initialize(user_name, password)
+                await self._connection_wait()
             finally:
                 await self._disconnect()
             if not self.reconnect:
@@ -271,22 +301,35 @@ class Room(WebsocketConnection, EventHandler):
             await asyncio.sleep(3)
         self.end_tasks()
 
+    async def _initialize(self, user_name: str = "", password: str = ""):
+        """
+        Send websocket commands to connect and login to the room
+        """
+        try:
+            await self.send_command("v", wait_for_response=True)
+            await self._auth(user_name, password, wait_for_response=True)
+            if self.user.isanon:
+                await self.send_command("msgbg", "0")
+            await self._request_initial_data()
+        except (TimeoutError, ConnectionError) as e:
+            logger.error(f"Handshake failed for {self.name}: {e}")
+            raise
+
     async def _auth(self, user_name: str = "", password: str = "", **kwargs):
         """
-        Login when joining a room
+        Send bauth command to login to this room
         """
-        if user_name:
-            self.session.user = UserManager.get_user(name=user_name)
+        session_id = self.session.session_id if self._session else ""
         return await self.send_command(
             "bauth",
             self.name,
-            self.session.session_id or "",
+            session_id,
             user_name,
             password,
             **kwargs,
         )
 
-    async def _login(self, user_name: str = "", password: str = "", **kwargs):
+    async def login(self, user_name: str = "", password: str = "", **kwargs):
         """
         Login after having connected as anon
         """
@@ -298,8 +341,16 @@ class Room(WebsocketConnection, EventHandler):
             )
         return await self.send_command("blogin", user_name, password, **kwargs)
 
-    async def _logout(self):
+    async def logout(self):
         await self.send_command("blogout")
+
+    async def send_command(self, *args, **kwargs):
+        command = args[0]
+        if command in ["v", "bauth"]:
+            kwargs["terminator"] = "\x00"
+        if kwargs.pop("wait_for_response", None):
+            kwargs["expect"] = Room.command_responses[command]
+        return await super().send_command(*args, **kwargs)
 
     async def send_message(self, message, *, use_html=False, flags=None, **kwargs):
         if not self.silent:
@@ -515,11 +566,11 @@ class Room(WebsocketConnection, EventHandler):
 
     async def get_premium_info(self):
         """Sequential workflow to request and return premium status."""
-        return await self.send_command("getpremium", "l", expect="premium", timeout=5.0)
+        return await self.send_command("getpremium", "l", expect="premium")
 
     async def get_announcement(self):
         """Sequential workflow to request and return the current announcement."""
-        return await self.send_command("getannouncement", expect="getannc", timeout=5.0)
+        return await self.send_command("getannouncement", expect="getannc")
 
     async def set_bg_mode(self, mode):
         self._bgmode = mode
@@ -563,6 +614,19 @@ class Room(WebsocketConnection, EventHandler):
             self.call_event("announcement_update", enabled != 0)
         self.call_event("announcement", body)
 
+    #
+    # Received Command Handlers
+    #
+
+    async def _rcmd_v(self, args):
+        """
+        Reports the minimum and current protocol versions supported by the server
+
+        Format: v:minimum_version:current_version
+        """
+        self._version = args[1]
+        self.call_event("v")
+
     async def _rcmd_ok(self, args):
         """
         Processes the 'ok' command which signals successful connection and
@@ -588,14 +652,13 @@ class Room(WebsocketConnection, EventHandler):
             user = UserManager.get_user()
 
         # 2. Update Room and Session State
-        self.owner = UserManager.get_user(name=owner_name)
-        self.session.user = user
-        self.session.session_id = session_id
-        self.session.ts_id = ts_id
-        self.session.ip = ip
-        self.session.conn_time = ts_id
-        self.session.correction_time = int(float(ts_id) - time.time())
-
+        self._owner = UserManager.get_user(name=owner_name)
+        self._session = Session(room=self, user=user)
+        self._session.session_id = session_id
+        self._session.ts_id = ts_id
+        self._session.ip = ip
+        self._session.conn_time = ts_id
+        self._session.correction_time = int(float(ts_id) - time.time())
         self._flags = RoomFlags(int(flags_str))
 
         # 3. Initialize Mods
@@ -780,9 +843,11 @@ class Room(WebsocketConnection, EventHandler):
             self.call_event("mod_remove", user)
 
     async def _rcmd_groupflagsupdate(self, args):
-        flags = args[0]
-        self._flags = RoomFlags(int(flags))
+        self._flags = RoomFlags(int(args[0]))
         self.call_event("groupflagsupdate")
+
+    async def _rcmd_groupflagstoggled(self, args):
+        self.call_event("groupflagstoggled")
 
     async def _rcmd_blocked(self, args):
         encoded_cookie = args[0]
@@ -998,16 +1063,14 @@ class Room(WebsocketConnection, EventHandler):
         Processes the 'logoutok' command which signals that the user has
         successfully logged out and reverted to anonymous status.
         """
-        if not self.session:
-            return
+        if self._session:
+            # Revert to anonymous status using the cookie (aid) from the session
+            new_user = UserManager.get_user(
+                aid=self._session.short_cookie, ip=self._session.ip
+            )
 
-        # Revert to anonymous status using the cookie (aid) from the session
-        new_user = UserManager.get_user(
-            aid=self.session.short_cookie, ip=self.session.ip
-        )
-
-        self.session.user = new_user
-        self.call_event("logoutok", new_user)
+            self._session.user = new_user
+        self.call_event("logoutok")
 
     async def _rcmd_updateprofile(self, args):
         user = UserManager.get_user(name=args[0])
@@ -1015,9 +1078,6 @@ class Room(WebsocketConnection, EventHandler):
         self.call_event("updateprofile", user)
 
     # --- Documented Protocol Stubs ---
-
-    async def _rcmd_groupflagstoggled(self, args):
-        self.call_event("groupflagstoggled")
 
     async def _rcmd_cbw(self, args):
         self.call_event("cbw")
@@ -1054,9 +1114,6 @@ class Room(WebsocketConnection, EventHandler):
 
     async def _rcmd_mustlogin(self, args):
         self.call_event("mustlogin")
-
-    async def _rcmd_v(self, args):
-        self.call_event("v", args)
 
     async def _rcmd_badlogin(self, args):
         self.call_event("badlogin")

@@ -284,7 +284,7 @@ class CommandHandler:
             waiter = self.expect_command(expect, timeout)
 
         command = ":".join(str(a) for a in args)
-        logger.debug(f"OUT {command}")
+        logger.debug("OUT " + command.replace("\r", "\\r"))
         await self._send_command(command, **kwargs)
 
         if waiter:
@@ -299,7 +299,7 @@ class CommandHandler:
     async def _receive_command(self, command: str):
         if not command:
             return
-        logger.debug(f" IN {command}")
+        logger.debug(" IN " + command.replace("\r", "\\r"))
         action, *args = command.split(":")
 
         # Handle callback, modify internal state first

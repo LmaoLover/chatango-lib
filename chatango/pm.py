@@ -8,7 +8,7 @@ from .exceptions import AlreadyConnectedError
 from .handler import CommandHandler, EventHandler
 from .connection import WebsocketConnection
 from .user import User, Friend, UserManager, Session
-from .message import _process_pm, message_cut
+from .message import _process_pm, message_cut, Command
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ class PM(WebsocketConnection, EventHandler):
             self.session.user = UserManager.get_user(user_name)
 
             if ok_args:
-                self.session.session_id = ok_args[0]
+                self.session.session_id = ok_args.args[0]
 
             await self.send_command("wl")
             await self.send_command("getblock")
@@ -148,53 +148,58 @@ class PM(WebsocketConnection, EventHandler):
 
     # --- Command Handlers ---
 
-    async def _rcmd_OK(self, args):
+    async def handle_OK(self, cmd: Command):
         pass
 
-    async def _rcmd_premium(self, args):
+    async def handle_premium(self, cmd: Command):
+        args = cmd.args
         if args and args[0] == "210":
             self._premium = True
             await self.enable_bg()
         else:
             self._premium = False
 
-    async def _rcmd_time(self, args):
+    async def handle_time(self, cmd: Command):
+        args = cmd.args
         conn_time = args[0]
         self.session.conn_time = conn_time
         # Convert ms to seconds if needed, but chatango correction_time usually expects float
         self.session.correction_time = int(float(conn_time) - time.time())
 
-    async def _rcmd_kickingoff(self, args):
+    async def handle_kickingoff(self, cmd: Command):
         self.call_event("kickingoff")
         self.__token = None
         await self.disconnect()
 
-    async def _rcmd_DENIED(self, args):
+    async def handle_DENIED(self, cmd: Command):
         self.call_event("DENIED")
         self.__token = None
         await self.disconnect()
 
-    async def _rcmd_toofast(self, args):
+    async def handle_toofast(self, cmd: Command):
         self._silent = time.time() + 12
         self.call_event("toofast")
 
-    async def _rcmd_msglexceeded(self, args):
+    async def handle_msglexceeded(self, cmd: Command):
         self.call_event("msglexceeded")
 
-    async def _rcmd_msg(self, args):
+    async def handle_msg(self, cmd: Command):
+        args = cmd.args
         # msg:msg_id:sender_handle:timestamp:message_content
         msg = await _process_pm(self, args)
         self._add_to_history(msg)
         self.call_event("msg", msg)
 
-    async def _rcmd_msgoff(self, args):
+    async def handle_msgoff(self, cmd: Command):
+        args = cmd.args
         # msgoff:msg_id:sender_handle:timestamp:message_content
         msg = await _process_pm(self, args)
         msg.msgoff = True
         self._add_to_history(msg)
         self.call_event("msgoff", msg)
 
-    async def _rcmd_wl(self, args):
+    async def handle_wl(self, cmd: Command):
+        args = cmd.args
         self._friends.clear()
         # Modern WL format is just colon-separated fields consumed 4 by 4
         # uid, last_logout, status, idle_mins
@@ -223,26 +228,30 @@ class PM(WebsocketConnection, EventHandler):
 
         self.call_event("wl")
 
-    async def _rcmd_wlonline(self, args):
+    async def handle_wlonline(self, cmd: Command):
+        args = cmd.args
         friend = self._friends.get(args[0].lower())
         if friend:
             friend._status = "online"
             friend._last_active = time.time()
             self.call_event("wlonline", friend)
 
-    async def _rcmd_wloffline(self, args):
+    async def handle_wloffline(self, cmd: Command):
+        args = cmd.args
         friend = self._friends.get(args[0].lower())
         if friend:
             friend._status = "offline"
             self.call_event("wloffline", friend)
 
-    async def _rcmd_wlapp(self, args):
+    async def handle_wlapp(self, cmd: Command):
+        args = cmd.args
         friend = self._friends.get(args[0].lower())
         if friend:
             friend._status = "app"
             self.call_event("wlapp", friend)
 
-    async def _rcmd_wladd(self, args):
+    async def handle_wladd(self, cmd: Command):
+        args = cmd.args
         name = args[0]
         user = UserManager.get_user(name)
         friend = Friend(user, self)
@@ -250,13 +259,15 @@ class PM(WebsocketConnection, EventHandler):
         self.call_event("wladd", friend)
         await self.send_command("track", user.name)
 
-    async def _rcmd_wldelete(self, args):
+    async def handle_wldelete(self, cmd: Command):
+        args = cmd.args
         name = args[0].lower()
         if name in self._friends:
             friend = self._friends.pop(name)
             self.call_event("wldelete", friend)
 
-    async def _rcmd_idleupdate(self, args):
+    async def handle_idleupdate(self, cmd: Command):
+        args = cmd.args
         # idleupdate:user_handle:state
         name = args[0].lower()
         state = args[1]
@@ -266,11 +277,13 @@ class PM(WebsocketConnection, EventHandler):
             friend._last_active = time.time()
             self.call_event("idleupdate", friend)
 
-    async def _rcmd_presence(self, args):
+    async def handle_presence(self, cmd: Command):
+        args = cmd.args
         # presence:data
         self.call_event("presence", args)
 
-    async def _rcmd_block_list(self, args):
+    async def handle_block_list(self, cmd: Command):
+        args = cmd.args
         # block_list:list_data (semicolon separated)
         raw_list = ":".join(args)
         self._blocked = [
@@ -278,22 +291,26 @@ class PM(WebsocketConnection, EventHandler):
         ]
         self.call_event("block_list")
 
-    async def _rcmd_unblocked(self, args):
+    async def handle_unblocked(self, cmd: Command):
+        args = cmd.args
         name = args[0].lower()
         self._blocked = [u for u in self._blocked if u.name != name]
         self.call_event("unblocked", UserManager.get_user(name))
 
-    async def _rcmd_settings(self, args):
+    async def handle_settings(self, cmd: Command):
+        args = cmd.args
         # settings:settings_json
         self.call_event("settings", args[0])
 
-    async def _rcmd_seller_name(self, args):
+    async def handle_seller_name(self, cmd: Command):
+        args = cmd.args
         # seller_name:name[:session_id]
         if len(args) > 1:
             self.session.session_id = args[1]
         self.call_event("seller_name", args[0])
 
-    async def _rcmd_reload_profile(self, args):
+    async def handle_reload_profile(self, cmd: Command):
+        args = cmd.args
         user = UserManager.get_user(name=args[0])
         self.call_event("reload_profile", user)
 

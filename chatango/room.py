@@ -14,7 +14,7 @@ from .utils import (
     _id_gen,
     public_attributes,
 )
-from .message import MessageFlags, RoomMessage, _process, message_cut
+from .message import MessageFlags, RoomMessage, _process, message_cut, Command
 from .user import RegisteredUser, User, ModeratorFlags, AdminFlags, UserManager, Session
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
@@ -58,6 +58,7 @@ class Room(WebsocketConnection, EventHandler):
     command_responses = {
         "v": "v",
         "bauth": "ok",
+        "blogin": ("pwdok", "badlogin", "aliasok", "badalias"),
         "gparticipants": "gparticipants",
         "updategroupflags": "groupflagstoggled",
     }
@@ -171,7 +172,7 @@ class Room(WebsocketConnection, EventHandler):
 
     @property
     def badge(self):
-        badge_val = self.session.badge
+        badge_val = self.session.badge if self._session else None
 
         if not badge_val:
             return 0
@@ -262,7 +263,6 @@ class Room(WebsocketConnection, EventHandler):
         """
         await super()._disconnect()
         self._reset_state(self.name)
-        self.call_event("disconnect")
 
     async def _connection_wait(self):
         """
@@ -270,6 +270,7 @@ class Room(WebsocketConnection, EventHandler):
         """
         if self._recv_task:
             await self._recv_task
+        self.call_event("disconnect")
 
     async def disconnect(self):
         """
@@ -306,8 +307,8 @@ class Room(WebsocketConnection, EventHandler):
         Send websocket commands to connect and login to the room
         """
         try:
-            await self.send_command("v", wait_for_response=True)
-            await self._auth(user_name, password, wait_for_response=True)
+            await self.send_command("v", expect="v")
+            await self._auth(user_name, password, expect="ok")
             if self.user.isanon:
                 await self.send_command("msgbg", "0")
             await self._request_initial_data()
@@ -333,13 +334,18 @@ class Room(WebsocketConnection, EventHandler):
         """
         Login after having connected as anon
         """
-        if password:
+        result = await self.send_command(
+            "blogin", user_name, password, **kwargs, wait_for_response=True
+        )
+        if not result:
+            return
+        elif result.name == "pwdok":
             self.session.user = UserManager.get_user(name=user_name)
-        else:
+        elif result.name == "aliasok" and self.session.short_cookie:
             self.session.user = UserManager.get_user(
                 name=user_name, aid=self.session.short_cookie
             )
-        return await self.send_command("blogin", user_name, password, **kwargs)
+        return result
 
     async def logout(self):
         await self.send_command("blogout")
@@ -587,15 +593,17 @@ class Room(WebsocketConnection, EventHandler):
                 name_color="000000", font_color="000000", font_size=11, font_face=1
             )
 
-    def _process_premium_state(self, args):
+    def _process_premium_state(self, cmd: Command):
+        args = cmd.args
         code = args[0]
         is_prem = code in ["200", "210"] or (self.owner == self.user)
         self.user.ispremium = is_prem
         if is_prem:
             self.add_task(self.send_command("msgbg", str(self._bgmode or 1)))
 
-    def _process_announcement_state(self, args, from_get=False):
+    def _process_announcement_state(self, cmd: Command, from_get=False):
         """Helper to process announcement data from both 'annc' and 'getannc'."""
+        args = cmd.args
         if from_get:
             # getannc: enabled(0), room(1), ?(2), periodicity(3), message(4+)
             if len(args) < 4 or args[0].lower() == "none":
@@ -618,30 +626,32 @@ class Room(WebsocketConnection, EventHandler):
     # Received Command Handlers
     #
 
-    async def _rcmd_v(self, args):
+    async def handle_v(self, cmd: Command):
         """
         Reports the minimum and current protocol versions supported by the server
 
         Format: v:minimum_version:current_version
         """
-        self._version = args[1]
+        self._version = int(cmd.fields[2])
         self.call_event("v")
 
-    async def _rcmd_ok(self, args):
+    async def handle_ok(self, cmd: Command):
         """
         Processes the 'ok' command which signals successful connection and
         provides room/user metadata.
 
         Format: ok:OWNER:COOKIE:LOGIN_AS:CURRENT_NAME:CONN_TIME:IP:MODS:FLAGS
         """
-        owner_name = args[0]
-        session_id = args[1]
-        login_status = args[2]
-        current_name = args[3]
-        ts_id = args[4]
-        ip = args[5]
-        mods_str = args[6]
-        flags_str = args[7]
+        (
+            owner_name,
+            session_id,
+            login_status,
+            current_name,
+            ts_id,
+            ip,
+            mods_str,
+            flags_str,
+        ) = cmd.fields[1:]
 
         # 1. Resolve current User
         if login_status == "M":
@@ -674,29 +684,32 @@ class Room(WebsocketConnection, EventHandler):
         await self.load_profile()
         self.call_event("ok")
 
-    async def _rcmd_inited(self, args):
+    async def handle_inited(self, cmd: Command):
         self.call_event("inited")
 
-    async def _rcmd_pwdok(self, args):
+    async def handle_pwdok(self, cmd: Command):
         await self.send_command("getpremium", "l")
         await self._style_init(self.user)
 
-    async def _rcmd_annc(self, args):
-        self._process_announcement_state(args, from_get=False)
+    async def handle_annc(self, cmd: Command):
+        self._process_announcement_state(cmd, from_get=False)
 
-    async def _rcmd_nomore(self, args):  # TODO
+    async def handle_nomore(self, cmd: Command):  # TODO
         """No more past messages"""
         pass
 
-    async def _rcmd_n(self, args):
+    async def handle_n(self, cmd: Command):
+        args = cmd.args
         self._usercount = int(args[0], 16)
 
-    async def _rcmd_i(self, args):
+    async def handle_i(self, cmd: Command):
         """history past messages"""
+        args = cmd.args
         msg = await _process(self, args)
         self._add_history_left(msg)
 
-    async def _rcmd_b(self, args):
+    async def handle_b(self, cmd: Command):
+        args = cmd.args
         msg = await _process(self, args)
         if args[5] in self._uqueue:
             msg.id = self._uqueue.pop(args[5])
@@ -705,10 +718,11 @@ class Room(WebsocketConnection, EventHandler):
         else:
             self._mqueue[msg.id] = msg
 
-    async def _rcmd_premium(self, args):
-        self._process_premium_state(args)
+    async def handle_premium(self, cmd: Command):
+        self._process_premium_state(cmd)
 
-    async def _rcmd_u(self, args):
+    async def handle_u(self, cmd: Command):
+        args = cmd.args
         if args[0] in self._mqueue:
             msg = self._mqueue.pop(args[0])
             msg.id = args[1]
@@ -717,13 +731,14 @@ class Room(WebsocketConnection, EventHandler):
         else:
             self._uqueue[args[0]] = args[1]
 
-    async def _rcmd_gparticipants(self, args):
+    async def handle_gparticipants(self, cmd: Command):
         """
         Processes the 'gparticipants' command which provides a full list of
         all participants in the room.
 
         Format: gparticipants:numAnons:SESSIONID:TIME:COOKIE:NAME:ALIAS:IP;...
         """
+        args = cmd.args
         self._anoncount = int(args[0])
         self._userdict = dict()
 
@@ -758,13 +773,14 @@ class Room(WebsocketConnection, EventHandler):
 
         self.call_event("participants")
 
-    async def _rcmd_participant(self, args):
+    async def handle_participant(self, cmd: Command):
         """
         Processes the 'participant' command which signals a single user
         joining, leaving, or changing authentication status.
 
         Format: participant:STATUS:SESSIONID:COOKIE:NAME:ALIAS:IP:TIME
         """
+        args = cmd.args
         status = args[0]
         ssid = args[1]
         cookie = args[2]
@@ -819,7 +835,8 @@ class Room(WebsocketConnection, EventHandler):
                     self._anoncount += 1
                 self.call_event("logout", user)
 
-    async def _rcmd_mods(self, args):
+    async def handle_mods(self, cmd: Command):
+        args = cmd.args
         pre = self._mods
         mods = self._mods = dict()
 
@@ -842,14 +859,16 @@ class Room(WebsocketConnection, EventHandler):
         for user in set(pre.keys()) - self.mods:
             self.call_event("mod_remove", user)
 
-    async def _rcmd_groupflagsupdate(self, args):
+    async def handle_groupflagsupdate(self, cmd: Command):
+        args = cmd.args
         self._flags = RoomFlags(int(args[0]))
         self.call_event("groupflagsupdate")
 
-    async def _rcmd_groupflagstoggled(self, args):
+    async def handle_groupflagstoggled(self, cmd: Command):
         self.call_event("groupflagstoggled")
 
-    async def _rcmd_blocked(self, args):
+    async def handle_blocked(self, cmd: Command):
+        args = cmd.args
         encoded_cookie = args[0]
         ip = args[1]
         name = args[2]
@@ -867,7 +886,8 @@ class Room(WebsocketConnection, EventHandler):
         )
         self.call_event("blocked", target, moderator)
 
-    async def _rcmd_blocklist(self, args):
+    async def handle_blocklist(self, cmd: Command):
+        args = cmd.args
         self._banlist = dict()
         sections = ":".join(args).split(";")
         for section in sections:
@@ -891,13 +911,14 @@ class Room(WebsocketConnection, EventHandler):
             )
         self.call_event("blocklist")
 
-    async def _rcmd_unblocked(self, args):
+    async def handle_unblocked(self, cmd: Command):
         """
         Processes the 'unblocked' command which signals one or more users
         have been unbanned.
 
         Format: unblocked:COOKIE:IP:NAME;COOKIE:IP:NAME;...
         """
+        args = cmd.args
         raw_data = ":".join(args)
 
         for record in raw_data.split(";"):
@@ -934,12 +955,13 @@ class Room(WebsocketConnection, EventHandler):
             # 3. Trigger Event (target only)
             self.call_event("unblocked", target)
 
-    async def _rcmd_unblocklist(self, args):
+    async def handle_unblocklist(self, cmd: Command):
         """
         Processes the 'unblocklist' command which provides the history of unbanned users.
 
         Format: unblocklist:COOKIE:IP:NAME:TIMESTAMP:MODERATOR;...
         """
+        args = cmd.args
         raw_data = ":".join(args)
         if not raw_data:
             return
@@ -966,40 +988,46 @@ class Room(WebsocketConnection, EventHandler):
 
         self.call_event("unblocklist")
 
-    async def _rcmd_clearall(self, args):
+    async def handle_clearall(self, cmd: Command):
+        args = cmd.args
         self.call_event("clearall", args[0])
 
-    async def _rcmd_denied(self, args):
+    async def handle_denied(self, cmd: Command):
         self.call_event("denied")
         await self.disconnect()
 
-    async def _rcmd_updatemoderr(self, args):
+    async def handle_updatemoderr(self, cmd: Command):
+        args = cmd.args
         self.call_event("updatemoderr", UserManager.get_user(name=args[1]), args[0])
 
-    async def _rcmd_proxybanned(self, args):
+    async def handle_proxybanned(self, cmd: Command):
         self.call_event("proxybanned")
 
-    async def _rcmd_show_fw(self, args):
+    async def handle_show_fw(self, cmd: Command):
         self.call_event("show_fw")
 
-    async def _rcmd_show_tb(self, args):
+    async def handle_show_tb(self, cmd: Command):
+        args = cmd.args
         self.call_event("show_tb", int(args[0]))
 
-    async def _rcmd_tb(self, args):
+    async def handle_tb(self, cmd: Command):
         """Temporary ban sigue activo con el tiempo indicado"""
+        args = cmd.args
         self.call_event("temp_ban", int(args[0]))
 
-    async def _rcmd_updgroupinfo(self, args):
+    async def handle_updgroupinfo(self, cmd: Command):
         await self.load_profile()
         self.call_event("updgroupinfo")
 
-    async def _rcmd_miu(self, args):
+    async def handle_miu(self, cmd: Command):
+        args = cmd.args
         user = UserManager.get_user(name=args[0])
         await user.load_resources()
         self.call_event("miu", user)
 
-    async def _rcmd_delete(self, args):
+    async def handle_delete(self, cmd: Command):
         """Borrar un mensaje de mi vista actual"""
+        args = cmd.args
         msg = self._remove_history(args[0])
         if msg:
             self.call_event("delete", msg)
@@ -1007,15 +1035,17 @@ class Room(WebsocketConnection, EventHandler):
         if len(self._history) < 20 and not self._nomore:
             await self.send_command("get_more", "20", "0")
 
-    async def _rcmd_deleteall(self, args):
+    async def handle_deleteall(self, cmd: Command):
         """Mensajes han sido borrados"""
+        args = cmd.args
         msgs_nones = [self._remove_history(msgid) for msgid in args]
         msgs = [msg for msg in msgs_nones if msg]
         if msgs:
             self.call_event("deleteall", msgs)
 
     # Receive banned word lists from server
-    async def _rcmd_bw(self, args):
+    async def handle_bw(self, cmd: Command):
+        args = cmd.args
         part, whole = "", ""
         if args:
             part = urlreq.unquote(args[0])
@@ -1024,41 +1054,44 @@ class Room(WebsocketConnection, EventHandler):
         self._banned_words = (part, whole)
         self.call_event("bw")
 
-    async def _rcmd_getannc(self, args):
-        self._process_announcement_state(args, from_get=True)
+    async def handle_getannc(self, cmd: Command):
+        self._process_announcement_state(cmd, from_get=True)
 
-    async def _rcmd_getratelimit(self, args):
+    async def handle_getratelimit(self, cmd: Command):
+        args = cmd.args
         self._rate_limit = int(args[0])
         self.call_event("ratelimitset")
 
-    async def _rcmd_ratelimitset(self, args):
+    async def handle_ratelimitset(self, cmd: Command):
+        args = cmd.args
         self._rate_limit = int(args[0])
         self.call_event("ratelimitset")
 
-    async def _rcmd_ratelimited(self, args):
+    async def handle_ratelimited(self, cmd: Command):
+        args = cmd.args
         wait_time = int(args[0])
         self.call_event("ratelimited", wait_time)
 
-    async def _rcmd_msglexceeded(self, args):
+    async def handle_msglexceeded(self, cmd: Command):
         self.call_event("msglexceeded")
 
     # Server updated banned words
-    async def _rcmd_ubw(self, args):
+    async def handle_ubw(self, cmd: Command):
         await self.send_command("getbannedwords")
 
-    async def _rcmd_climited(self, args):
+    async def handle_climited(self, cmd: Command):
         self.call_event("climited")
 
-    async def _rcmd_show_nlp(self, args):
+    async def handle_show_nlp(self, cmd: Command):
         self.call_event("show_nlp")
 
-    async def _rcmd_nlptb(self, args):
+    async def handle_nlptb(self, cmd: Command):
         self.call_event("nlptb")
 
-    async def _rcmd_logoutfirst(self, args):
+    async def handle_logoutfirst(self, cmd: Command):
         self.call_event("logoutfirst")
 
-    async def _rcmd_logoutok(self, args):
+    async def handle_logoutok(self, cmd: Command):
         """
         Processes the 'logoutok' command which signals that the user has
         successfully logged out and reverted to anonymous status.
@@ -1072,78 +1105,79 @@ class Room(WebsocketConnection, EventHandler):
             self._session.user = new_user
         self.call_event("logoutok")
 
-    async def _rcmd_updateprofile(self, args):
+    async def handle_updateprofile(self, cmd: Command):
+        args = cmd.args
         user = UserManager.get_user(name=args[0])
         await user.load_resources()
         self.call_event("updateprofile", user)
 
     # --- Documented Protocol Stubs ---
 
-    async def _rcmd_cbw(self, args):
+    async def handle_cbw(self, cmd: Command):
         self.call_event("cbw")
 
-    async def _rcmd_end_fw(self, args):
+    async def handle_end_fw(self, cmd: Command):
         self.call_event("end_fw")
 
-    async def _rcmd_show_nlp_tb(self, args):
+    async def handle_show_nlp_tb(self, cmd: Command):
         self.call_event("show_nlp_tb")
 
-    async def _rcmd_end_nlp(self, args):
+    async def handle_end_nlp(self, cmd: Command):
         self.call_event("end_nlp")
 
-    async def _rcmd_notifysettings(self, args):
+    async def handle_notifysettings(self, cmd: Command):
         self.call_event("notifysettings")
 
-    async def _rcmd_setnotifysettings(self, args):
+    async def handle_setnotifysettings(self, cmd: Command):
         self.call_event("setnotifysettings")
 
-    async def _rcmd_checkemail_notify(self, args):
+    async def handle_checkemail_notify(self, cmd: Command):
         self.call_event("checkemail_notify")
 
-    async def _rcmd_addmoderr(self, args):
+    async def handle_addmoderr(self, cmd: Command):
         self.call_event("addmoderr")
 
-    async def _rcmd_removemoderr(self, args):
+    async def handle_removemoderr(self, cmd: Command):
         self.call_event("removemoderr")
 
-    async def _rcmd_modactions(self, args):
+    async def handle_modactions(self, cmd: Command):
         self.call_event("modactions")
 
-    async def _rcmd_gotmore(self, args):
+    async def handle_gotmore(self, cmd: Command):
         self.call_event("gotmore")
 
-    async def _rcmd_mustlogin(self, args):
+    async def handle_mustlogin(self, cmd: Command):
         self.call_event("mustlogin")
 
-    async def _rcmd_badlogin(self, args):
+    async def handle_badlogin(self, cmd: Command):
         self.call_event("badlogin")
 
-    async def _rcmd_badalias(self, args):
+    async def handle_badalias(self, cmd: Command):
         self.call_event("badalias")
 
-    async def _rcmd_aliasok(self, args):
+    async def handle_aliasok(self, cmd: Command):
         self.call_event("aliasok")
 
-    async def _rcmd_chatango(self, args):
+    async def handle_chatango(self, cmd: Command):
         self.call_event("chatango")
 
-    async def _rcmd_limitexceeded(self, args):
+    async def handle_limitexceeded(self, cmd: Command):
         self.call_event("limitexceeded")
 
-    async def _rcmd_verificationrequired(self, args):
+    async def handle_verificationrequired(self, cmd: Command):
         self.call_event("verificationrequired")
 
-    async def _rcmd_verificationchanged(self, args):
+    async def handle_verificationchanged(self, cmd: Command):
         self.call_event("verificationchanged")
 
-    async def _rcmd_versioningPU(self, args):
+    async def handle_versioningPU(self, cmd: Command):
         self.call_event("versioningPU")
 
-    async def _rcmd_badbansearchstring(self, args):
+    async def handle_badbansearchstring(self, cmd: Command):
         self.call_event("badbansearchstring")
 
-    async def _rcmd_bansearchresult(self, args):
+    async def handle_bansearchresult(self, cmd: Command):
         self.call_event("bansearchresult")
 
-    async def _rcmd_allunblocked(self, args):
+    async def handle_allunblocked(self, cmd: Command):
         self.call_event("allunblocked")

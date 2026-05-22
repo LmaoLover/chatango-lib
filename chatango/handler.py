@@ -3,7 +3,8 @@ import asyncio
 import logging
 import traceback
 from collections.abc import Iterable
-from typing import Coroutine, Optional
+from typing import Coroutine, Optional, Union
+from .message import Command
 
 logger = logging.getLogger(__name__)
 
@@ -211,16 +212,17 @@ provide implementation for _send_command which sends the command out on
 the network.
 
 The method _receive_command parses the command format, and will automatically
-call a method handler named _rcmd_{action}.  It also supports Request-Response
+call a method handler named handle_{action}.  It also supports Request-Response
 multiplexing via the expect_command method.
 
  Command:
    premium:0:12345678
 
  Method:
-   _rcmd_premium
- args:
-   ["0", "12345678"]
+   handle_premium
+ cmd:
+   args: ["0", "12345678"]
+   fields: ("premium", "0", "12345678")
 
 """
 
@@ -235,33 +237,42 @@ class CommandHandler:
 
     """
     Returns an awaitable that resolves when the server sends a command
-    matching 'action'.
+    matching 'action'. Returns a Command object.
+    'action' can be a single string or an iterable of strings.
     """
 
-    def expect_command(self, action: str, timeout: float = 10.0):
+    def expect_command(self, action: Union[str, Iterable[str]], timeout: float = 10.0):
+        actions = [action] if isinstance(action, str) else list(action)
+        if not actions:
+            raise ValueError("No commands to expect")
+
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
-        if action not in self._pending_waiters:
-            self._pending_waiters[action] = []
-        self._pending_waiters[action].append(fut)
-        return self._expect_command_internal(action, fut, timeout)
+
+        for a in actions:
+            if a not in self._pending_waiters:
+                self._pending_waiters[a] = []
+            self._pending_waiters[a].append(fut)
+
+        return self._expect_command_internal(actions, fut, timeout)
 
     """
-    Internal awaitable for expect_command
+    Internal awaitable for expect_command. Handles the timeout and
+    ensures the future is cleaned up from the registry.
     """
 
     async def _expect_command_internal(
-        self, action: str, fut: asyncio.Future, timeout: float
+        self, actions: Iterable[str], fut: asyncio.Future, timeout: float
     ):
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         finally:
-            # Cleanup this specific future from the registry
-            if action in self._pending_waiters:
-                if fut in self._pending_waiters[action]:
-                    self._pending_waiters[action].remove(fut)
-                if not self._pending_waiters[action]:
-                    del self._pending_waiters[action]
+            for a in actions:
+                waiters = self._pending_waiters.get(a)
+                if waiters and fut in waiters:
+                    waiters.remove(fut)
+                    if not waiters:
+                        del self._pending_waiters[a]
 
     """
     Internal method to send a command using the protocol of the
@@ -273,11 +284,15 @@ class CommandHandler:
 
     """
     Public send method. If 'expect' is provided, it returns the server's
-    response for that matching command.
+    response for that matching command. Returns a Command object or None.
     """
 
     async def send_command(
-        self, *args, expect: Optional[str] = None, timeout: float = 10.0, **kwargs
+        self,
+        *args,
+        expect: Optional[Union[str, Iterable[str]]] = None,
+        timeout: float = 10.0,
+        **kwargs,
     ):
         waiter = None
         if expect:
@@ -296,29 +311,29 @@ class CommandHandler:
     method handler.
     """
 
-    async def _receive_command(self, command: str):
-        if not command:
+    async def _receive_command(self, raw_command: str):
+        if not raw_command:
             return
-        logger.debug(" IN " + command.replace("\r", "\\r"))
-        action, *args = command.split(":")
+        logger.debug(" IN " + raw_command.replace("\r", "\\r"))
+        cmd = Command(raw_command)
 
         # Handle callback, modify internal state first
-        if hasattr(self, f"_rcmd_{action}"):
+        if hasattr(self, f"handle_{cmd.name}"):
             try:
-                await getattr(self, f"_rcmd_{action}")(args)
+                await getattr(self, f"handle_{cmd.name}")(cmd)
             except Exception as e:
-                logger.error(f"Error while handling command {action}")
+                logger.error(f"Error while handling command {cmd.name}")
                 traceback.print_exception(e, file=sys.stderr)
         else:
-            logger.error(f"Unhandled received command {action}")
+            logger.error(f"Unhandled received command {cmd.name}")
 
         # Resolve all waiters for this action
-        if action in self._pending_waiters:
+        if cmd.name in self._pending_waiters:
             # Pop the entire list to clear expectations immediately
-            waiters = self._pending_waiters.pop(action)
+            waiters = self._pending_waiters.pop(cmd.name)
             for fut in waiters:
                 if not fut.done():
-                    fut.set_result(args)
+                    fut.set_result(cmd)
 
     """
     Release any workflows waiting for a response if the connection drops.

@@ -13,6 +13,27 @@ if TYPE_CHECKING:
     from .room import Room
 
 
+class Command:
+    def __init__(self, raw: str):
+        self.raw = raw
+        self._parts = raw.split(":")
+
+    def __repr__(self):
+        return f"<Command {self.name} args={self.args}>"
+
+    @property
+    def name(self):
+        return self._parts[0]
+
+    @property
+    def args(self):
+        return self._parts[1:]
+
+    @property
+    def fields(self):
+        return tuple(self._parts)
+
+
 class MessageFlags(enum.IntFlag):
     PREMIUM = 1 << 2
     BG_ON = 1 << 3

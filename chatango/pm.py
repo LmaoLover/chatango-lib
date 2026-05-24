@@ -89,8 +89,8 @@ class PM(WebsocketConnection, EventHandler):
                 )
 
             handshake_args = ["tlogin", self.__token, "2"]
-            if self.session.session_id:
-                handshake_args.append(self.session.session_id)
+            if self.session.auth_token:
+                handshake_args.append(self.session.auth_token)
 
             ok_args = await self.send_command(
                 *handshake_args, expect="OK", timeout=10.0, terminator="\x00"
@@ -98,7 +98,7 @@ class PM(WebsocketConnection, EventHandler):
             self.session.user = UserManager.get_user(user_name)
 
             if ok_args:
-                self.session.session_id = ok_args.args[0]
+                self.session.auth_token = ok_args.args[0]
 
             await self.send_command("wl")
             await self.send_command("getblock")
@@ -149,7 +149,8 @@ class PM(WebsocketConnection, EventHandler):
     # --- Command Handlers ---
 
     async def handle_OK(self, cmd: Command):
-        pass
+        if cmd.args:
+            self.session.auth_token = cmd.args[0]
 
     async def handle_premium(self, cmd: Command):
         args = cmd.args
@@ -304,9 +305,9 @@ class PM(WebsocketConnection, EventHandler):
 
     async def handle_seller_name(self, cmd: Command):
         args = cmd.args
-        # seller_name:name[:session_id]
+        # seller_name:name[:auth_token]
         if len(args) > 1:
-            self.session.session_id = args[1]
+            self.session.auth_token = args[1]
         self.call_event("seller_name", args[0])
 
     async def handle_reload_profile(self, cmd: Command):

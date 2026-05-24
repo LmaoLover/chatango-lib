@@ -316,11 +316,14 @@ class Styles:
             return f"{f_tag}{inner}"
         return inner
 
-    def get_name_tag(self, is_anon: bool = False) -> str:
-        """Generates the <n{color}/> tag for username color."""
-        if is_anon or not self.name_color:
+    def get_name_tag(self, is_anon: bool = False, ts_short: Optional[str] = None) -> str:
+        """Generates the <n{color}/> or <n{ts_short}/> tag."""
+        if is_anon and ts_short:
+            return f"<n{ts_short}/>"
+        elif self.name_color:
+            return f"<n{self.compress_hex(self.name_color)}/>"
+        else:
             return ""
-        return f"<n{self.compress_hex(self.name_color)}/>"
 
     def to_dict(self) -> Dict[str, str]:
         """Converts styles to a dictionary compatible with the Chatango /updatemsgstyles API."""

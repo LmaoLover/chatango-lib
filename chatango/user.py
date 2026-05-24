@@ -49,21 +49,27 @@ AdminFlags = (
 )
 
 
-def get_anon_name(tssid: str, aid: str) -> str:
-    """Derives an anonymous handle from a tag ID and shortened cookie."""
-    aid = aid.zfill(8)[4:8]
-    ts = str(tssid)
+def get_anon_name(ts_short: str, aid: str) -> str:
+    """Derives an anonymous handle from a short timestamp ID and shortened cookie."""
+    if not aid:
+        return "anon"
+    # aid is either 8-char ShortenedCookie or 16-digit Auth-Token
+    aid_part = str(aid).zfill(8)[4:8]
+    ts = str(ts_short)
     if not ts or len(ts) < 4:
         ts = "3452"
     else:
-        ts = ts.split(".")[0][-4:]
+        ts = ts.split(".")[0][-4:].zfill(4)
     __reg5 = ""
     __reg1 = 0
-    while __reg1 < len(aid):
-        __reg4 = int(aid[__reg1])
-        __reg3 = int(ts[__reg1])
-        __reg2 = str(__reg4 + __reg3)
-        __reg5 += __reg2[-1:]
+    while __reg1 < len(aid_part) and __reg1 < len(ts):
+        try:
+            __reg4 = int(aid_part[__reg1])
+            __reg3 = int(ts[__reg1])
+            __reg2 = str(__reg4 + __reg3)
+            __reg5 += __reg2[-1:]
+        except (ValueError, IndexError):
+            __reg5 += "0"
         __reg1 += 1
     return "anon" + __reg5.zfill(4)
 
@@ -297,7 +303,7 @@ class AnonymousUser(User):
     def __init__(self, aid, **kwargs):
         super().__init__(**kwargs)
         self._aid = aid
-        self._display_id = str(kwargs.get("display_id", "3452"))
+        self._ts_short = str(kwargs.get("ts_short", "3452"))
 
     @property
     def aid(self):
@@ -305,7 +311,7 @@ class AnonymousUser(User):
 
     @property
     def name(self):
-        return get_anon_name(self._display_id, self.aid)
+        return get_anon_name(self._ts_short, self.aid)
 
 
 class TemporaryUser(AnonymousUser):
@@ -323,10 +329,12 @@ class Session:
         self,
         user: User,
         room: Union["Room", "PM"],
-        session_id: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        ssid: Optional[str] = None,
         short_cookie: Optional[str] = None,
         encoded_cookie: Optional[str] = None,
         ts_id: Optional[str] = None,
+        ts_short: Optional[str] = None,
         ip: Optional[str] = None,
         conn_time: Optional[str] = None,
         correction_time: int = 0,
@@ -334,10 +342,12 @@ class Session:
     ):
         self.user = user
         self.room = room
-        self.session_id = session_id  # SSID
-        self.short_cookie = short_cookie  # AID
+        self.auth_token = auth_token
+        self.ssid = ssid
+        self.short_cookie = short_cookie
         self.encoded_cookie = encoded_cookie
         self.ts_id = ts_id
+        self.ts_short = ts_short
         self.ip = ip
         self.conn_time = conn_time
         self.correction_time = correction_time
@@ -345,7 +355,18 @@ class Session:
 
     def __repr__(self):
         name = self.user.showname if self.user else "Unknown"
-        return f"<Session user:{name} ssid:{self.session_id} ip:{self.ip}>"
+        return "<Session user:{} {}{}{}{}ip:{}>".format(
+            name,
+            f"auth_token:{self.auth_token} " if self.auth_token else "",
+            f"ssid:{self.ssid} " if self.ssid else "",
+            f"cookie:{self.short_cookie} " if self.short_cookie else "",
+            (
+                f"ts_id:{self.ts_id} "
+                if self.ts_id
+                else (f"ts_short:{self.ts_short} " if self.ts_short else "")
+            ),
+            self.ip,
+        )
 
 
 class UserManager:
@@ -397,8 +418,8 @@ class UserManager:
             user = cls._users[key]
             # Update transient attributes if provided
             if isinstance(user, AnonymousUser):
-                if "display_id" in kwargs:
-                    user._display_id = str(kwargs["display_id"])
+                if "ts_short" in kwargs:
+                    user._ts_short = str(kwargs["ts_short"])
 
             # Unified name update
             if name:

@@ -135,9 +135,10 @@ async def _process(room, args):
         user = UserManager.get_user(name=name)
     else:
         # Anonymous or Temporary User
+        # Extract Display Number (<nNNNN/> tag)
         n_match = re.search(r"<n(\d{4})/?\s*>", body)
-        n = n_match.group(1) if n_match else "3452"
-        user = UserManager.get_user(name=tname, aid=aid, display_id=n)
+        ts_short = n_match.group(1) if n_match else "3452"
+        user = UserManager.get_user(name=tname, aid=aid, ts_short=ts_short)
 
     msg = RoomMessage(user, room)
     msg.time = float(_time)

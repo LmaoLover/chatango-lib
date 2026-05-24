@@ -320,11 +320,11 @@ class Room(WebsocketConnection, EventHandler):
         """
         Send bauth command to login to this room
         """
-        session_id = self.session.session_id if self._session else ""
+        auth_token = self.session.auth_token if self._session else ""
         return await self.send_command(
             "bauth",
             self.name,
-            session_id,
+            auth_token,
             user_name,
             password,
             **kwargs,
@@ -369,7 +369,8 @@ class Room(WebsocketConnection, EventHandler):
             msg = msg.replace("\n", "\r").replace("~", "&#126;")
             for msg in message_cut(msg, self._maxlen):
                 is_anon = self.user.isanon
-                styled_msg = f"{self.user.styles.get_name_tag(is_anon)}{self.user.styles.format_message(msg, is_anon=is_anon)}"
+                ts_short = self.session.ts_short if self._session else None
+                styled_msg = f"{self.user.styles.get_name_tag(is_anon, ts_short)}{self.user.styles.format_message(msg, is_anon=is_anon)}"
                 await self.send_command("bm", _id_gen(), int(message_flags), styled_msg)
 
     def set_font(
@@ -640,11 +641,11 @@ class Room(WebsocketConnection, EventHandler):
         Processes the 'ok' command which signals successful connection and
         provides room/user metadata.
 
-        Format: ok:OWNER:COOKIE:LOGIN_AS:CURRENT_NAME:CONN_TIME:IP:MODS:FLAGS
+        Format: ok:OWNER:AUTH_TOKEN:LOGIN_STATUS:CURRENT_NAME:SERVER_TS:IP:MODS:FLAGS
         """
         (
             owner_name,
-            session_id,
+            auth_token,
             login_status,
             current_name,
             ts_id,
@@ -653,21 +654,27 @@ class Room(WebsocketConnection, EventHandler):
             flags_str,
         ) = cmd.fields[1:]
 
+        ts_short = ts_id.split(".")[0][-4:].zfill(4)
+
         # 1. Resolve current User
         if login_status == "M":
             user = UserManager.get_user(name=current_name)
             await self._style_init(user)
         else:
-            # Guest: Create a stub user, identity will be discovered in gparticipants
-            user = UserManager.get_user()
+            # Create an anon user with Auth-Token as aid.
+            user = UserManager.get_user(aid=auth_token, ts_short=ts_short)
 
         # 2. Update Room and Session State
         self._owner = UserManager.get_user(name=owner_name)
-        self._session = Session(room=self, user=user)
-        self._session.session_id = session_id
-        self._session.ts_id = ts_id
-        self._session.ip = ip
-        self._session.conn_time = ts_id
+        self._session = Session(
+            room=self,
+            user=user,
+            auth_token=auth_token,
+            ts_id=ts_id,
+            ts_short=ts_short,
+            ip=ip,
+            conn_time=ts_id,
+        )
         self._session.correction_time = int(float(ts_id) - time.time())
         self._flags = RoomFlags(int(flags_str))
 
@@ -736,11 +743,16 @@ class Room(WebsocketConnection, EventHandler):
         Processes the 'gparticipants' command which provides a full list of
         all participants in the room.
 
-        Format: gparticipants:numAnons:SESSIONID:TIME:COOKIE:NAME:ALIAS:IP;...
+        Format: gparticipants:numAnons:SSID:TIME:COOKIE:NAME:ALIAS:IP;...
         """
         args = cmd.args
         self._anoncount = int(args[0])
         self._userdict = dict()
+
+        # Only anons in chat
+        if len(args) == 1:
+            self.call_event("participants")
+            return
 
         raw_list = ":".join(args[1:])
         for record in raw_list.split(";"):
@@ -753,23 +765,30 @@ class Room(WebsocketConnection, EventHandler):
             alias = data[4] if data[4] != "None" else None
             ip = data[5] or None
 
+            ts_short = contime.split(".")[0][-4:].zfill(4)
+
             if name:
                 user = UserManager.get_user(name=name)
             elif alias:
-                user = UserManager.get_user(name=alias, aid=cookie)
+                user = UserManager.get_user(name=alias, aid=cookie, ts_short=ts_short)
             else:
-                user = UserManager.get_user(aid=cookie)
+                user = UserManager.get_user(aid=cookie, ts_short=ts_short)
 
             session = Session(
                 user=user,
                 room=self,
-                session_id=ssid,
+                ssid=ssid,
                 short_cookie=cookie,
                 ip=ip,
                 conn_time=contime,
             )
             user.add_session(session)
             self._userdict[ssid] = session
+
+            # If this is our own SSID, update our main session
+            # Note: We still don't have a foolproof way to know which SSID is ours
+            # but if IP and name match, it's a good guess.
+            # For now, just ensure we don't overwrite auth_token.
 
         self.call_event("participants")
 
@@ -778,7 +797,7 @@ class Room(WebsocketConnection, EventHandler):
         Processes the 'participant' command which signals a single user
         joining, leaving, or changing authentication status.
 
-        Format: participant:STATUS:SESSIONID:COOKIE:NAME:ALIAS:IP:TIME
+        Format: participant:STATUS:SSID:COOKIE:NAME:ALIAS:IP:TIME
         """
         args = cmd.args
         status = args[0]
@@ -789,17 +808,19 @@ class Room(WebsocketConnection, EventHandler):
         ip = args[5] or None
         contime = args[6]
 
+        ts_short = contime.split(".")[0][-4:].zfill(4)
+
         if name:
             user = UserManager.get_user(name=name)
         elif alias:
-            user = UserManager.get_user(name=alias, aid=cookie)
+            user = UserManager.get_user(name=alias, aid=cookie, ts_short=ts_short)
         else:
-            user = UserManager.get_user(aid=cookie)
+            user = UserManager.get_user(aid=cookie, ts_short=ts_short)
 
         session = Session(
             user=user,
             room=self,
-            session_id=ssid,
+            ssid=ssid,
             short_cookie=cookie,
             ip=ip,
             conn_time=contime,

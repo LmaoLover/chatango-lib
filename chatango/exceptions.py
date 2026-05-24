@@ -10,9 +10,5 @@ class AlreadyConnectedError(BaseRoomError):
     pass
 
 
-class NotConnectedError(BaseRoomError):
-    pass
-
-
 class InvalidRoomNameError(BaseRoomError):
     pass

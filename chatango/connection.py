@@ -58,7 +58,7 @@ class WebsocketConnection(CommandHandler):
                 raise
             else:
                 logger.warning(f"WebSocket handshake failed for {url}: {e}")
-                return
+                raise ConnectionError from e
 
         except aiohttp.ClientResponseError as e:
             await self._disconnect()
@@ -67,7 +67,7 @@ class WebsocketConnection(CommandHandler):
                 raise
             else:
                 logger.warning(f"HTTP error {e.status} for {url}: {e.message}")
-                return
+                raise ConnectionError from e
 
         except socket.gaierror as e:
             await self._disconnect()
@@ -81,7 +81,7 @@ class WebsocketConnection(CommandHandler):
                 raise
             else:
                 logger.warning(f"DNS resolution failed for {url}: {e}")
-                return
+                raise ConnectionError from e
 
         except (
             ConnectionResetError,
@@ -94,6 +94,7 @@ class WebsocketConnection(CommandHandler):
         ) as e:
             await self._disconnect()
             logger.warning(f"Temporary connection failure for {url}: {e}")
+            raise ConnectionError from e
 
         except aiohttp.ClientConnectorError as e:
             await self._disconnect()
@@ -110,17 +111,17 @@ class WebsocketConnection(CommandHandler):
                 raise
             else:
                 logger.warning(f"Network connectivity issue for {url}: {e}")
-                return
+                raise ConnectionError from e
 
         except aiohttp.ClientError as e:
             await self._disconnect()
             logger.warning(f"Client error for {url}: {e}")
-            return
+            raise ConnectionError from e
 
         except Exception as e:
             await self._disconnect()
             logger.warning(f"Unexpected error connecting to {url}: {e}")
-            return
+            raise ConnectionError from e
 
     async def _disconnect(self):
         self._connected = False
@@ -147,13 +148,16 @@ class WebsocketConnection(CommandHandler):
         logger.info("WebSocket disconnected")
 
     async def _send_command(self, command: str, terminator: str = "\r\n\0"):
-        if not self.connected:
-            logger.error(f'Message send failed "{command}": Not connected')
-            return
         try:
             await self._connection.send_str(command + terminator)
         except Exception as e:
             logger.error(f'Message send failed "{command}": {e}')
+
+    async def send_command(self, *args, **kwargs):
+        if not self.connected:
+            logger.error(f'Message send failed "{args[0]}": Not connected')
+            raise ConnectionError("Cannot send message, websocket not connected")
+        return await super().send_command(*args, **kwargs)
 
     async def _do_ping(self):
         """
@@ -175,9 +179,14 @@ class WebsocketConnection(CommandHandler):
         try:
             while self.connected:
                 try:
-                    message = await self._connection.receive()
+                    message = await asyncio.wait_for(
+                        self._connection.receive(), timeout=180
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"Websocket receive timeout, connection lost")
+                    break
                 except Exception as e:
-                    logger.error(f"Exception during receive, closing connection: {e}")
+                    logger.error(f"Websocket receive exception: {e}")
                     break
 
                 if message.type == aiohttp.WSMsgType.TEXT:

@@ -71,6 +71,9 @@ class Room(WebsocketConnection, EventHandler):
     def __init__(self, name: str):
         WebsocketConnection.__init__(self)
         EventHandler.__init__(self)
+        self.reconnect = False
+        self.silent = False
+        self.message_flags = 0
         self._reset_state(name)
 
     def _reset_state(self, name: str):
@@ -81,9 +84,6 @@ class Room(WebsocketConnection, EventHandler):
         self._session: Optional[Session] = None
         self._flags: Optional[RoomFlags] = None
         self._version: Optional[int] = None
-        self.reconnect = False
-        self.silent = False
-        self.message_flags = 0
         self._mqueue = dict()
         self._uqueue = dict()
         self._messages = dict()
@@ -270,7 +270,7 @@ class Room(WebsocketConnection, EventHandler):
         """
         if self._recv_task:
             await self._recv_task
-        self.call_event("disconnect")
+            self.call_event("disconnect")
 
     async def disconnect(self):
         """
@@ -295,6 +295,8 @@ class Room(WebsocketConnection, EventHandler):
                 await self._connect_server()
                 await self._initialize(user_name, password)
                 await self._connection_wait()
+            except ConnectionError:
+                pass
             finally:
                 await self._disconnect()
             if not self.reconnect:
@@ -312,9 +314,9 @@ class Room(WebsocketConnection, EventHandler):
             if self.user.isanon:
                 await self.send_command("msgbg", "0")
             await self._request_initial_data()
-        except (TimeoutError, ConnectionError) as e:
-            logger.error(f"Handshake failed for {self.name}: {e}")
-            raise
+        except TimeoutError as e:
+            logger.error(f"Failed initialization handshake for {self.name}: {e}")
+            raise ConnectionError() from e
 
     async def _auth(self, user_name: str = "", password: str = "", **kwargs):
         """

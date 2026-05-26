@@ -22,8 +22,7 @@ class Fetchable(Protocol):
     """Protocol for resources that can be fetched via a class method."""
 
     @classmethod
-    async def fetch(cls: Type[T], handle: str) -> T:
-        ...
+    async def fetch(cls: Type[T], handle: str) -> T: ...
 
 
 async def _get_data(url: str) -> Optional[str]:
@@ -71,7 +70,9 @@ async def _post_data(url: str, data: Dict[str, str]) -> Optional[str]:
     return None
 
 
-async def fetch_resources(handle: str, resource_types: List[Type[Fetchable]]) -> List[Any]:
+async def fetch_resources(
+    handle: str, resource_types: List[Type[Fetchable]]
+) -> List[Any]:
     """Fetches multiple resources in parallel for a given handle."""
     if not handle:
         return []
@@ -284,7 +285,11 @@ class Styles:
             has_style = True
 
         if self.text_color != "000000":
-            f_prefix += f"s{self.compress_hex(self.text_color)}" if is_pm else self.compress_hex(self.text_color)
+            f_prefix += (
+                f"s{self.compress_hex(self.text_color)}"
+                if is_pm
+                else self.compress_hex(self.text_color)
+            )
             has_style = True
 
         f_prefix += '="'
@@ -295,7 +300,9 @@ class Styles:
 
         return f_prefix if has_style else ""
 
-    def format_message(self, text: str, is_pm: bool = False, is_anon: bool = False) -> str:
+    def format_message(
+        self, text: str, is_pm: bool = False, is_anon: bool = False
+    ) -> str:
         """Wraps text in the appropriate tags based on current styles and user type."""
         if is_anon:
             return text
@@ -316,7 +323,9 @@ class Styles:
             return f"{f_tag}{inner}"
         return inner
 
-    def get_name_tag(self, is_anon: bool = False, ts_short: Optional[str] = None) -> str:
+    def get_name_tag(
+        self, is_anon: bool = False, ts_short: Optional[str] = None
+    ) -> str:
         """Generates the <n{color}/> or <n{ts_short}/> tag."""
         if is_anon and ts_short:
             return f"<n{ts_short}/>"
@@ -459,7 +468,9 @@ class UserProfile:
 
             self.last_update = time.time()
         except Exception as e:
-            logger.debug(f"Failed to parse query string in update_from_query_string: {e}")
+            logger.debug(
+                f"Failed to parse query string in update_from_query_string: {e}"
+            )
 
     @classmethod
     async def fetch(cls, handle: str) -> "UserProfile":
@@ -495,13 +506,16 @@ class UserProfile:
         return await _post_data(url, update_data) is not None
 
 
-@dataclass
+@dataclass(repr=False)
 class RoomProfile:
     """Models room profile data from gprofile.xml."""
 
     group_title: str = ""
     group_body_html: str = ""
     last_update: float = 0.0
+
+    def __repr__(self):
+        return f'<RoomProfile title:"{self.group_title}" body:"{self.group_body_html}">'
 
     @classmethod
     def from_xml(cls, data: str) -> "RoomProfile":

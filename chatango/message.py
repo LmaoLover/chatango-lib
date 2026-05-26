@@ -86,14 +86,12 @@ class Message:
         """Resets the style data to defaults."""
         self._styles = None
 
-    @property
-    def _clean_body_text(self):
+    @classmethod
+    def clean_body_text(cls, raw: str) -> str:
         """Strips Chatango tags from the raw message to get clean body text."""
-        is_pm = isinstance(self, PMMessage)
-        tag = "g" if is_pm else "f"
         # Strip <n.../>, <f...>, <g...>, <b>, <i>, <u>, and closing tags
         text = re.sub(
-            r"<(n|/?b|/?i|/?u|/?" + tag + r")[^>]*>", "", self.raw, flags=re.IGNORECASE
+            r"<(n|/?b|/?i|/?u|/?f|/?g)[^>]*>", "", raw, flags=re.IGNORECASE
         )
         # Convert <br/> to newline
         text = re.sub(r"<br[^>]*>", "\n", text, flags=re.IGNORECASE)
@@ -147,7 +145,7 @@ async def _process(room, args):
     msg.encoded_cookie = encoded_cookie
     msg.ip = ip
     msg.raw = body
-    msg.body = msg._clean_body_text
+    msg.body = Message.clean_body_text(body)
 
     msg.flags = MessageFlags(int(flags))
     ispremium = MessageFlags.PREMIUM in msg.flags
@@ -183,7 +181,7 @@ async def _process_pm(pm, args):
     msg = PMMessage(user, pm)
     msg.time = timestamp
     msg.raw = body
-    msg.body = msg._clean_body_text
+    msg.body = Message.clean_body_text(body)
     return msg
 
 

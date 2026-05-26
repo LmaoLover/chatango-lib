@@ -7,14 +7,15 @@ import logging
 import urllib.parse as urlreq
 
 from collections import deque, namedtuple
-from typing import Optional
+from typing import Optional, Tuple
+from attr import dataclass
 
 from .utils import (
     get_server,
     _id_gen,
     public_attributes,
 )
-from .message import MessageFlags, RoomMessage, _process, message_cut, Command
+from .message import Message, MessageFlags, RoomMessage, _process, message_cut, Command
 from .user import RegisteredUser, User, ModeratorFlags, AdminFlags, UserManager, Session
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
@@ -59,6 +60,10 @@ class Room(WebsocketConnection, EventHandler):
         "v": "v",
         "bauth": "ok",
         "blogin": ("pwdok", "badlogin", "aliasok", "badalias"),
+        "getpremium": "premium",
+        "getannouncement": "getannc",
+        "getbannedwords": "bw",
+        "getratelimit": "getratelimit",
         "gparticipants": "gparticipants",
         "updategroupflags": "groupflagstoggled",
     }
@@ -67,6 +72,31 @@ class Room(WebsocketConnection, EventHandler):
     def assert_valid_name(cls, room_name: str):
         if not Room.valid_name.match(room_name):
             raise InvalidRoomNameError(room_name)
+
+    @dataclass(repr=False)
+    class Announcement:
+        flags: int = 0
+        room_name: str = ""
+        message_raw: str = ""
+        period: Optional[int] = None
+        message_delay: Optional[int] = None
+
+        def __repr__(self):
+            return '<Announcement {} {} "{}"{}{}>'.format(
+                self.room_name,
+                "enabled" if self.enabled else "disabled",
+                self.message,
+                f" period:{self.period}" if self.period else "",
+                f" message_delay:{self.message_delay}" if self.message_delay else "",
+            )
+
+        @property
+        def enabled(self) -> bool:
+            return bool(self.flags & 1)
+
+        @property
+        def message(self) -> str:
+            return Message.clean_body_text(self.message_raw)
 
     def __init__(self, name: str):
         WebsocketConnection.__init__(self)
@@ -84,24 +114,24 @@ class Room(WebsocketConnection, EventHandler):
         self._session: Optional[Session] = None
         self._flags: Optional[RoomFlags] = None
         self._version: Optional[int] = None
+        self._profile: Optional[RoomProfile] = None
+        self._announcement: Optional[Room.Announcement] = None
+        self._banned_words: Optional[Tuple[str, str]] = None
+        self._rate_limit: Optional[int] = None
         self._mqueue = dict()
         self._uqueue = dict()
         self._messages = dict()
         self._history = deque(maxlen=3000)
-        self._mods = dict()
         self._userdict = dict()
+        self._usercount: Optional[int] = None
+        self._anoncount: Optional[int] = None
+        self._mods = dict()
         self._banlist = dict()
         self._unbanlist = dict()
         self._unbanqueue = deque(maxlen=500)
-        self._usercount: Optional[int] = None
-        self._anoncount: Optional[int] = None
         self._maxlen = 2800
         self._bgmode = 0
         self._nomore = False
-        self._profile = RoomProfile()
-        self._banned_words = ("", "")
-        self._announcement = [0, 0, ""]
-        self._rate_limit = 0
 
     def __dir__(self):
         return public_attributes(self)
@@ -151,20 +181,45 @@ class Room(WebsocketConnection, EventHandler):
 
     @property
     def profile(self) -> RoomProfile:
-        return self._profile
+        if self._profile is not None:
+            return self._profile
+        else:
+            raise AttributeError("Profile not available, first call load_profile")
 
-    async def load_profile(self):
-        """Fetches the group profile resource and updates instance."""
-        results = await fetch_resources(self.name, [RoomProfile])
-        if results:
-            self._profile = results[0]
+    @property
+    def title(self) -> str:
+        return self.profile.group_title
 
-    async def save_profile(self, password: str):
-        """Saves current room profile properties to the server via class method."""
-        handle = self.user.name
-        if not handle:
-            return False
-        return await RoomProfile.save(self.name, password, self.profile)
+    @property
+    def description(self) -> str:
+        return self.profile.group_body_html
+
+    @property
+    def announcement(self) -> Announcement:
+        if self._announcement is not None:
+            return self._announcement
+        else:
+            raise AttributeError(
+                "Announcement not available, first send the getannc command"
+            )
+
+    @property
+    def banned_words(self) -> Tuple[str, str]:
+        if self._banned_words is not None:
+            return self._banned_words
+        else:
+            raise AttributeError(
+                "Banned words not available, first send the getbannedwords command"
+            )
+
+    @property
+    def rate_limit(self) -> int:
+        if self._rate_limit is not None:
+            return self._rate_limit
+        else:
+            raise AttributeError(
+                "Rate limit not available, first send the getratelimit command"
+            )
 
     @property
     def is_pm(self):
@@ -197,20 +252,8 @@ class Room(WebsocketConnection, EventHandler):
         return self._history
 
     @property
-    def description(self):
-        return self.profile.group_body_html
-
-    @property
-    def title(self):
-        return self.profile.group_title
-
-    @property
     def banlist(self):
         return list(self._banlist.keys())
-
-    @property
-    def rate_limit(self):
-        return self._rate_limit
 
     @property
     def mods(self):
@@ -313,7 +356,10 @@ class Room(WebsocketConnection, EventHandler):
             await self._auth(user_name, password, expect="ok")
             if self.user.isanon:
                 await self.send_command("msgbg", "0")
-            await self._request_initial_data()
+            else:
+                await self.get_premium()
+                await self._style_init(self.user)
+            await self.get_room_info()
         except TimeoutError as e:
             logger.error(f"Failed initialization handshake for {self.name}: {e}")
             raise ConnectionError() from e
@@ -343,9 +389,11 @@ class Room(WebsocketConnection, EventHandler):
             return
         elif result.name == "pwdok":
             self.session.user = UserManager.get_user(name=user_name)
-        elif result.name == "aliasok" and self.session.short_cookie:
+            await self.get_premium()
+            await self._style_init(self.user)
+        elif result.name == "aliasok" and self.session.auth_token:
             self.session.user = UserManager.get_user(
-                name=user_name, aid=self.session.short_cookie
+                name=user_name, aid=self.session.auth_token
             )
         return result
 
@@ -374,6 +422,46 @@ class Room(WebsocketConnection, EventHandler):
                 ts_short = self.session.ts_short if self._session else None
                 styled_msg = f"{self.user.styles.get_name_tag(is_anon, ts_short)}{self.user.styles.format_message(msg, is_anon=is_anon)}"
                 await self.send_command("bm", _id_gen(), int(message_flags), styled_msg)
+
+    async def get_room_info(self):
+        """Requests initial state data from server."""
+        await self.get_announcement()
+        await self.get_banned_words()
+        await self.get_rate_limit()
+        # TODO these don't work
+        # await self.request_banlist()
+        # await self.request_unbanlist()
+        await self.load_profile()
+
+    async def get_premium(self, **kwargs):
+        """Request logged in user's premium status"""
+        return await self.send_command("getpremium", **kwargs)
+
+    async def get_announcement(self, **kwargs):
+        """Request the room's scheduled announcement info"""
+        return await self.send_command("getannouncement", **kwargs)
+
+    async def get_banned_words(self, **kwargs):
+        """Request the room's banned words"""
+        return await self.send_command("getbannedwords", **kwargs)
+
+    async def get_rate_limit(self, **kwargs):
+        """Request the room's message posting rate limit"""
+        return await self.send_command("getratelimit", **kwargs)
+
+    async def load_profile(self):
+        """Fetches the group profile resource and updates instance."""
+        results = await fetch_resources(self.name, [RoomProfile])
+        if results:
+            self._profile = results[0]
+            self.call_event("profile")
+
+    async def save_profile(self, password: str):
+        """Saves current room profile properties to the server via class method."""
+        handle = self.user.name
+        if not handle:
+            return False
+        return await RoomProfile.save(self.name, password, self.profile)
 
     def set_font(
         self, name_color=None, font_color=None, font_size=None, font_face=None
@@ -554,17 +642,6 @@ class Room(WebsocketConnection, EventHandler):
             return True
         return False
 
-    async def _request_initial_data(self):
-        """Requests initial state data from server."""
-        await self.send_command("getpremium", "l")
-        await self.send_command("getannouncement")
-        await self.send_command("getbannedwords")
-        await self.send_command("getratelimit")
-        await self.request_banlist()
-        await self.request_unbanlist()
-        if self.user.ispremium:
-            await self._style_init(self.user)
-
     async def request_participants(self):
         """Enables participant mode."""
         await self.send_command("gparticipants")
@@ -573,18 +650,10 @@ class Room(WebsocketConnection, EventHandler):
         """Disables participant mode."""
         await self.send_command("gparticipants", "stop")
 
-    async def get_premium_info(self):
-        """Sequential workflow to request and return premium status."""
-        return await self.send_command("getpremium", "l", expect="premium")
-
-    async def get_announcement(self):
-        """Sequential workflow to request and return the current announcement."""
-        return await self.send_command("getannouncement", expect="getannc")
-
     async def set_bg_mode(self, mode):
         self._bgmode = mode
         if self.connected:
-            await self.send_command("getpremium", "l")
+            await self.send_command("getpremium")
             if self.user.ispremium:
                 await self.send_command("msgbg", str(self._bgmode))
 
@@ -595,35 +664,6 @@ class Room(WebsocketConnection, EventHandler):
             self.set_font(
                 name_color="000000", font_color="000000", font_size=11, font_face=1
             )
-
-    def _process_premium_state(self, cmd: Command):
-        args = cmd.args
-        code = args[0]
-        is_prem = code in ["200", "210"] or (self.owner == self.user)
-        self.user.ispremium = is_prem
-        if is_prem:
-            self.add_task(self.send_command("msgbg", str(self._bgmode or 1)))
-
-    def _process_announcement_state(self, cmd: Command, from_get=False):
-        """Helper to process announcement data from both 'annc' and 'getannc'."""
-        args = cmd.args
-        if from_get:
-            # getannc: enabled(0), room(1), ?(2), periodicity(3), message(4+)
-            if len(args) < 4 or args[0].lower() == "none":
-                return
-            enabled = int(args[0])
-            period = int(args[3])
-            body = ":".join(args[4:])
-        else:
-            # annc: flags(0), group_name(1), message(2+)
-            enabled = int(args[0])
-            period = 0  # Not provided in broadcast
-            body = ":".join(args[2:])
-
-        if body != self._announcement[2]:
-            self._announcement = [enabled, period, body]
-            self.call_event("announcement_update", enabled != 0)
-        self.call_event("announcement", body)
 
     #
     # Received Command Handlers
@@ -690,18 +730,122 @@ class Room(WebsocketConnection, EventHandler):
                     mflags = ModeratorFlags(int(power))
                     self._mods[mod_user] = mflags
 
-        await self.load_profile()
         self.call_event("ok")
 
     async def handle_inited(self, cmd: Command):
         self.call_event("inited")
 
     async def handle_pwdok(self, cmd: Command):
-        await self.send_command("getpremium", "l")
-        await self._style_init(self.user)
+        self.call_event("pwdok")
+
+    async def handle_badlogin(self, cmd: Command):
+        self.call_event("badlogin")
+
+    async def handle_badalias(self, cmd: Command):
+        self.call_event("badalias")
+
+    async def handle_aliasok(self, cmd: Command):
+        self.call_event("aliasok")
+
+    async def handle_premium(self, cmd: Command):
+        """
+        Premium status update.
+        Format: premium:status_code:expiry
+        """
+        args = cmd.args
+        code = args[0]
+        is_prem = code in ["200", "210"] or (self.owner == self.user)
+        self.user.ispremium = is_prem
+        if is_prem:
+            self.add_task(self.send_command("msgbg", str(self._bgmode or 1)))
 
     async def handle_annc(self, cmd: Command):
-        self._process_announcement_state(cmd, from_get=False)
+        """
+        Broadcast announcement update.
+        Format: annc:flags:group_name:message
+        """
+        args = cmd.args
+        flags = int(args[0])
+        room = args[1]
+        body = ":".join(args[2:])
+
+        # For broadcast, we preserve existing period/delay if we have them
+        period = self._announcement.period if self._announcement else None
+        delay = self._announcement.message_delay if self._announcement else None
+
+        self._announcement = Room.Announcement(
+            flags=flags,
+            room_name=room,
+            message_raw=body,
+            period=period,
+            message_delay=delay,
+        )
+
+        self.call_event("announcement")
+
+    async def handle_getannc(self, cmd: Command):
+        """
+        Announcement configuration sync.
+        Format: getannc:flags:room:message_delay:period:message
+        """
+        args = cmd.args
+        # Alternate format: getannc:none
+        if args[0].lower() == "none":
+            self._announcement = Room.Announcement()
+        else:
+            flags = int(args[0])
+            room = args[1]
+            delay = int(args[2])
+            period = int(args[3])
+            body = ":".join(args[4:])
+
+            self._announcement = Room.Announcement(
+                flags=flags,
+                room_name=room,
+                message_raw=body,
+                period=period,
+                message_delay=delay,
+            )
+        self.call_event("announcement")
+
+    async def handle_bw(self, cmd: Command):
+        """
+        Receives the updated list of banned words from the server.
+        Format: bw:partially_banned:fully_banned
+        """
+        args = cmd.args
+        part, whole = "", ""
+        if args:
+            part = urlreq.unquote(args[0])
+        if len(args) > 1:
+            whole = urlreq.unquote(args[1])
+        self._banned_words = (part, whole)
+        self.call_event("banned_words")
+
+    async def handle_ubw(self, cmd: Command):
+        """
+        Informs the client that the banned word list has been updated on the server.
+        Format: ubw
+        """
+        await self.get_banned_words()
+
+    async def handle_getratelimit(self, cmd: Command):
+        """
+        The server's response to an outgoing getratelimit request.
+        Format: getratelimit:limit:seconds_left
+        """
+        args = cmd.args
+        self._rate_limit = int(args[0])
+        self.call_event("rate_limit")
+
+    async def handle_ratelimitset(self, cmd: Command):
+        """
+        Broadcasted by the server when a moderator updates the room's rate limit.
+        Format: ratelimitset:limit
+        """
+        args = cmd.args
+        self._rate_limit = int(args[0])
+        self.call_event("rate_limit")
 
     async def handle_nomore(self, cmd: Command):  # TODO
         """No more past messages"""
@@ -726,9 +870,6 @@ class Room(WebsocketConnection, EventHandler):
             self.call_event("message", msg)
         else:
             self._mqueue[msg.id] = msg
-
-    async def handle_premium(self, cmd: Command):
-        self._process_premium_state(cmd)
 
     async def handle_u(self, cmd: Command):
         args = cmd.args
@@ -1040,7 +1181,7 @@ class Room(WebsocketConnection, EventHandler):
 
     async def handle_updgroupinfo(self, cmd: Command):
         await self.load_profile()
-        self.call_event("updgroupinfo")
+        # load_profile calls "profile" event
 
     async def handle_miu(self, cmd: Command):
         args = cmd.args
@@ -1066,30 +1207,6 @@ class Room(WebsocketConnection, EventHandler):
         if msgs:
             self.call_event("deleteall", msgs)
 
-    # Receive banned word lists from server
-    async def handle_bw(self, cmd: Command):
-        args = cmd.args
-        part, whole = "", ""
-        if args:
-            part = urlreq.unquote(args[0])
-        if len(args) > 1:
-            whole = urlreq.unquote(args[1])
-        self._banned_words = (part, whole)
-        self.call_event("bw")
-
-    async def handle_getannc(self, cmd: Command):
-        self._process_announcement_state(cmd, from_get=True)
-
-    async def handle_getratelimit(self, cmd: Command):
-        args = cmd.args
-        self._rate_limit = int(args[0])
-        self.call_event("ratelimitset")
-
-    async def handle_ratelimitset(self, cmd: Command):
-        args = cmd.args
-        self._rate_limit = int(args[0])
-        self.call_event("ratelimitset")
-
     async def handle_ratelimited(self, cmd: Command):
         args = cmd.args
         wait_time = int(args[0])
@@ -1097,10 +1214,6 @@ class Room(WebsocketConnection, EventHandler):
 
     async def handle_msglexceeded(self, cmd: Command):
         self.call_event("msglexceeded")
-
-    # Server updated banned words
-    async def handle_ubw(self, cmd: Command):
-        await self.send_command("getbannedwords")
 
     async def handle_climited(self, cmd: Command):
         self.call_event("climited")
@@ -1171,15 +1284,6 @@ class Room(WebsocketConnection, EventHandler):
 
     async def handle_mustlogin(self, cmd: Command):
         self.call_event("mustlogin")
-
-    async def handle_badlogin(self, cmd: Command):
-        self.call_event("badlogin")
-
-    async def handle_badalias(self, cmd: Command):
-        self.call_event("badalias")
-
-    async def handle_aliasok(self, cmd: Command):
-        self.call_event("aliasok")
 
     async def handle_chatango(self, cmd: Command):
         self.call_event("chatango")

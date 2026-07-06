@@ -2,7 +2,8 @@ import re
 import time
 import enum
 import html
-from typing import Optional, Union, TYPE_CHECKING
+from collections import OrderedDict
+from typing import Union, Any, TYPE_CHECKING
 
 from .utils import public_attributes
 from .user import User, UserManager
@@ -90,9 +91,7 @@ class Message:
     def clean_body_text(cls, raw: str) -> str:
         """Strips Chatango tags from the raw message to get clean body text."""
         # Strip <n.../>, <f...>, <g...>, <b>, <i>, <u>, and closing tags
-        text = re.sub(
-            r"<(n|/?b|/?i|/?u|/?f|/?g)[^>]*>", "", raw, flags=re.IGNORECASE
-        )
+        text = re.sub(r"<(n|/?b|/?i|/?u|/?f|/?g)[^>]*>", "", raw, flags=re.IGNORECASE)
         # Convert <br/> to newline
         text = re.sub(r"<br[^>]*>", "\n", text, flags=re.IGNORECASE)
         return html.unescape(text).replace("\r", "\n").strip()
@@ -113,13 +112,17 @@ class PMMessage(Message):
 
 
 class RoomMessage(Message):
-    def __init__(self, user, room):
+    def __init__(self, user, room, id):
         super().__init__(user, room)
-        self.id = None
+        self.id: str = id
         self.short_cookie = str()
         self.ip = str()
         self.encoded_cookie = str()
         self.flags = 0
+        self.deleted = False
+
+    def __repr__(self):
+        return f'<RoomMessage {self.room.name} {self.user.name} {"deleted " if self.deleted else ""}"{self.body}">'
 
 
 async def _process(room, args):
@@ -138,10 +141,9 @@ async def _process(room, args):
         ts_short = n_match.group(1) if n_match else "3452"
         user = UserManager.get_user(name=tname, aid=aid, ts_short=ts_short)
 
-    msg = RoomMessage(user, room)
+    msg = RoomMessage(user, room, msgid)
     msg.time = float(_time)
     msg.short_cookie = str(aid)
-    msg.id = msgid
     msg.encoded_cookie = encoded_cookie
     msg.ip = ip
     msg.raw = body
@@ -187,3 +189,73 @@ async def _process_pm(pm, args):
 
 def message_cut(message, lenth):
     return [message[x : x + lenth] for x in range(0, len(message), lenth)]
+
+
+class MessageHistory(OrderedDict):
+    """Combined dict + deque for message storage based on OrderedDict.
+
+    Supports bounded size like deque(maxlen). Iterates over values
+    (messages) rather than keys. Supports negative integer indexing
+    for access to newest/oldest items.
+
+    When full, appending a new key evicts the oldest entry (left side).
+    appendleft() discards the incoming message when full.
+    """
+
+    def __init__(self, *args, maxlen: int = 20000, **kwargs):
+        self.maxlen = maxlen
+        super().__init__(*args, **kwargs)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Set item, evicting oldest if at capacity and key is new."""
+        if self.maxlen > 0 and key not in self and len(self) >= self.maxlen:
+            self.popitem(last=False)
+        super().__setitem__(key, value)
+
+    def append(self, key: str, value: Any) -> None:
+        """Add item to the right (newest). Evicts oldest if full."""
+        self[key] = value
+
+    def appendleft(self, key: str, value: Any) -> bool:
+        """Add item to the left (oldest). Returns False if discarded."""
+        if self.maxlen > 0 and len(self) >= self.maxlen and key not in self:
+            return False
+        super().__setitem__(key, value)
+        self.move_to_end(key, last=False)
+        return True
+
+    def last(self) -> Any:
+        """Return the most recent message."""
+        it = reversed(self.values())
+        return next(it, None)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return list(self.values())[key]
+        return super().__getitem__(key)
+
+    def __iter__(self):
+        return iter(self.values())
+
+    def __reversed__(self):
+        return reversed(self.values())
+
+    def copy(self):
+        new = MessageHistory(maxlen=self.maxlen)
+        for key, value in self.items():
+            new[key] = value
+        return new
+
+    def __copy__(self):
+        return self.copy()
+
+    def __or__(self, other):
+        new = self.copy()
+        new.update(other)
+        return new
+
+    def __ror__(self, other):
+        new = MessageHistory(maxlen=self.maxlen)
+        new.update(other)
+        new.update(self)
+        return new

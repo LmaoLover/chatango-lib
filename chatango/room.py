@@ -15,7 +15,15 @@ from .utils import (
     _id_gen,
     public_attributes,
 )
-from .message import Message, MessageFlags, RoomMessage, _process, message_cut, Command
+from .message import (
+    Message,
+    MessageFlags,
+    RoomMessage,
+    _process,
+    message_cut,
+    Command,
+    MessageHistory,
+)
 from .user import RegisteredUser, User, ModeratorFlags, AdminFlags, UserManager, Session
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
@@ -66,6 +74,7 @@ class Room(WebsocketConnection, EventHandler):
         "getratelimit": "getratelimit",
         "gparticipants": "gparticipants",
         "updategroupflags": "groupflagstoggled",
+        "get_more": ("gotmore", "nomore"),
     }
 
     @classmethod
@@ -120,8 +129,7 @@ class Room(WebsocketConnection, EventHandler):
         self._rate_limit: Optional[int] = None
         self._mqueue = dict()
         self._uqueue = dict()
-        self._messages = dict()
-        self._history = deque(maxlen=3000)
+        self._history = MessageHistory(maxlen=3000)
         self._userdict = dict()
         self._usercount: Optional[int] = None
         self._anoncount: Optional[int] = None
@@ -131,6 +139,7 @@ class Room(WebsocketConnection, EventHandler):
         self._unbanqueue = deque(maxlen=500)
         self._maxlen = 2800
         self._bgmode = 0
+        self._gotmore: Optional[int] = None
         self._nomore = False
 
     def __dir__(self):
@@ -222,6 +231,14 @@ class Room(WebsocketConnection, EventHandler):
             )
 
     @property
+    def messages(self) -> MessageHistory:
+        return self._history
+
+    @property
+    def history(self) -> MessageHistory:
+        return self._history
+
+    @property
     def is_pm(self):
         return False
 
@@ -242,14 +259,6 @@ class Room(WebsocketConnection, EventHandler):
     def unbanlist(self):
         """Lista de usuarios desbaneados"""
         return list(set(x.target.name for x in self._unbanqueue))
-
-    @property
-    def messages(self):
-        return self._messages
-
-    @property
-    def history(self):
-        return self._history
 
     @property
     def banlist(self):
@@ -463,6 +472,41 @@ class Room(WebsocketConnection, EventHandler):
             return False
         return await RoomProfile.save(self.name, password, self.profile)
 
+    def _delete_history(self, msgid) -> Optional[RoomMessage]:
+        """
+        Marks a message as deleted in the local history and returns it.
+        @param msgid: Unique message ID
+        """
+        if msg := self._history.get(msgid, None):
+            msg.deleted = True
+            return msg
+        else:
+            return None
+
+    def get_last_message(self, user=None) -> Optional[RoomMessage]:
+        """
+        Finds the most recent message in history, optionally for a specific user.
+        @param user: User object or name string
+        """
+        if not self._history:
+            return None
+        if not user:
+            return self._history.last()
+        if isinstance(user, str):
+            user = UserManager.get_user(name=user)
+        return next((m for m in reversed(self._history) if m.user == user), None)
+
+    async def get_more(self, n: int = 20, **kwargs):
+        """
+        Requests an additional batch of historical messages from the server.
+        Format: get_more:count:request_id
+        @param n: Number of messages to request (1-50)
+        """
+        if n < 1 or n > 50:
+            raise ValueError("History size must be between 1-50.")
+        req_id = self._gotmore + 1 if self._gotmore is not None else 0
+        return await self.send_command("get_more", str(n), str(req_id), **kwargs)
+
     def set_font(
         self, name_color=None, font_color=None, font_size=None, font_face=None
     ):
@@ -499,39 +543,8 @@ class Room(WebsocketConnection, EventHandler):
             user = UserManager.get_user(name=user)
         return self._banlist.get(user)
 
-    def get_last_message(self, user=None) -> Optional[RoomMessage]:
-        if not self._history:
-            return None
-        if not user:
-            return self._history[-1]
-        if isinstance(user, str):
-            user = UserManager.get_user(name=user)
-        for msg in reversed(self.history):
-            if msg.user == user:
-                return msg
-        return None
-
     async def _raw_unban(self, name, ip, encoded_cookie):
         await self.send_command("removeblock", encoded_cookie, ip, name)
-
-    def _add_history(self, msg):
-        if len(self._history) == self.history.maxlen:
-            rest = self._history.popleft()
-            self._messages.pop(rest.id)
-        self._history.append(msg)
-        self._messages[msg.id] = msg
-
-    def _add_history_left(self, msg):
-        # Add older history unless full
-        if self.history.maxlen and len(self._history) < self.history.maxlen:
-            self._history.appendleft(msg)
-            self._messages[msg.id] = msg
-
-    def _remove_history(self, msgid):
-        msg = self._messages.pop(msgid, None)
-        if msg and msg in self._history:
-            self._history.remove(msg)
-        return msg
 
     async def unban_user(self, user):
         rec = self.ban_record(user)
@@ -570,40 +583,47 @@ class Room(WebsocketConnection, EventHandler):
             return await self.ban_message(msg)
         return False
 
-    async def clear_all(self):
-        """Borra todos los mensajes"""
-        if (
-            self.user in self._mods
-            and ModeratorFlags.EDIT_GROUP in self._mods[self.user]
-            or self.user == self.owner
-        ):
-            await self.send_command("clearall")
-            return True
+    async def clear_all(self, **kwargs):
+        """
+        Clears all messages from the room history.
+        Format: clearall
+        """
+        # TODO bot user privilege check
+        return await self.send_command("clearall", **kwargs)
+
+    async def delete_message(self, message, **kwargs):
+        """
+        Deletes a single message from the room.
+        Format: delmsg:msg_id
+        @param message: RoomMessage object
+        """
+        # TODO bot user privilege check
+        if message and message.id:
+            return await self.send_command("delmsg", message.id, **kwargs)
         else:
-            return False
+            raise ValueError("Invalid message, cannot delete")
 
-    async def clear_user(self, user):
-        # TODO
-        if self.get_level(self.user) > 0:
-            msg = self.get_last_message(user)
-            if msg:
-                name = "" if msg.user.isanon else msg.user.name
-                await self.send_command("delallmsg", msg.encoded_cookie, msg.ip, name)
-                return True
-        return False
+    async def delete_user_last_message(self, user, **kwargs):
+        """
+        Deletes the most recent message sent by a specific user.
+        @param user: User object or name string
+        """
+        # TODO bot user privilege check
+        msg = self.get_last_message(user)
+        if msg:
+            return await self.delete_message(msg, **kwargs)
+        else:
+            raise ValueError("No message for user, cannot delete")
 
-    async def delete_message(self, message):
-        if self.get_level(self.user) > 0 and message.id:
-            await self.send_command("delmsg", message.id)
-            return True
-        return False
-
-    async def delete_user(self, user):
-        if self.get_level(self.user) > 0:
-            msg = self.get_last_message(user)
-            if msg:
-                await self.delete_message(msg)
-        return False
+    async def delete_user_all(self, user, **kwargs):
+        """
+        Deletes all messages sent by a specific user in the current session.
+        @param user: User object or name string
+        """
+        # TODO bot user privilege check
+        # TODO fetch all msg ids for user
+        # return await self.send_command("delallmsg", *msgids, **kwargs)
+        raise AttributeError("delete_user_all not implemented")
 
     async def request_unbanlist(self):
         await self.send_command(
@@ -732,19 +752,37 @@ class Room(WebsocketConnection, EventHandler):
 
         self.call_event("ok")
 
-    async def handle_inited(self, cmd: Command):
+    async def handle_inited(self, _):
+        """Signals that first page of chat history has been sent"""
         self.call_event("inited")
 
-    async def handle_pwdok(self, cmd: Command):
+    async def handle_gotmore(self, cmd: Command):
+        """
+        Confirms additional history received.
+        Format: gotmore:request_id
+        """
+        self._gotmore = int(cmd.args[0])
+        self.call_event("gotmore")
+
+    async def handle_nomore(self, _):
+        """Signals no more pages of history to get via get_more"""
+        self._nomore = True
+        self.call_event("nomore")
+
+    async def handle_pwdok(self, _):
+        """Confirms that the user's authentication credentials were verified"""
         self.call_event("pwdok")
 
-    async def handle_badlogin(self, cmd: Command):
+    async def handle_badlogin(self, _):
+        """Notifies the client that the authentication attempt failed"""
         self.call_event("badlogin")
 
-    async def handle_badalias(self, cmd: Command):
+    async def handle_badalias(self, _):
+        """Notifies the client that the temp name provided was rejected"""
         self.call_event("badalias")
 
-    async def handle_aliasok(self, cmd: Command):
+    async def handle_aliasok(self, _):
+        """Confirms that the temp name provided was accepted"""
         self.call_event("aliasok")
 
     async def handle_premium(self, cmd: Command):
@@ -847,36 +885,43 @@ class Room(WebsocketConnection, EventHandler):
         self._rate_limit = int(args[0])
         self.call_event("rate_limit")
 
-    async def handle_nomore(self, cmd: Command):  # TODO
-        """No more past messages"""
-        pass
-
     async def handle_n(self, cmd: Command):
         args = cmd.args
         self._usercount = int(args[0], 16)
 
     async def handle_i(self, cmd: Command):
-        """history past messages"""
-        args = cmd.args
-        msg = await _process(self, args)
-        self._add_history_left(msg)
+        """
+        Processes historical messages sent by the server during initialization.
+        Format: i:TS:SID:TNAME:COOKIE_SHORT:COOKIE_ENC:MSGID:IP:FLAGS:RESERVED:TEXT
+        """
+        msg = await _process(self, cmd.args)
+        self._history.appendleft(msg.id, msg)
+        self.call_event("message_history", msg)
 
     async def handle_b(self, cmd: Command):
+        """
+        Processes live broadcast messages from the room.
+        Format: b:TS:SID:TNAME:COOKIE_SHORT:COOKIE_ENC:MSGID:IP:FLAGS:RESERVED:TEXT
+        """
         args = cmd.args
         msg = await _process(self, args)
         if args[5] in self._uqueue:
             msg.id = self._uqueue.pop(args[5])
-            self._add_history(msg)
+            self._history.append(msg.id, msg)
             self.call_event("message", msg)
         else:
             self._mqueue[msg.id] = msg
 
     async def handle_u(self, cmd: Command):
+        """
+        Binds a temporary message ID to a permanent server-assigned ID.
+        Format: u:TEMP_MSG_ID:PERMANENT_MSG_ID
+        """
         args = cmd.args
         if args[0] in self._mqueue:
             msg = self._mqueue.pop(args[0])
             msg.id = args[1]
-            self._add_history(msg)
+            self._history.append(msg.id, msg)
             self.call_event("message", msg)
         else:
             self._uqueue[args[0]] = args[1]
@@ -1190,22 +1235,23 @@ class Room(WebsocketConnection, EventHandler):
         self.call_event("miu", user)
 
     async def handle_delete(self, cmd: Command):
-        """Borrar un mensaje de mi vista actual"""
-        args = cmd.args
-        msg = self._remove_history(args[0])
-        if msg:
-            self.call_event("delete", msg)
-        #
-        if len(self._history) < 20 and not self._nomore:
-            await self.send_command("get_more", "20", "0")
+        """
+        Broadcast message deletion.
+        Format: delete:msg_id
+        """
+        msg_id = cmd.args[0]
+        self._delete_history(msg_id)
+        self.call_event("delete", msg_id)
 
     async def handle_deleteall(self, cmd: Command):
-        """Mensajes han sido borrados"""
-        args = cmd.args
-        msgs_nones = [self._remove_history(msgid) for msgid in args]
-        msgs = [msg for msg in msgs_nones if msg]
-        if msgs:
-            self.call_event("deleteall", msgs)
+        """
+        Broadcast deletion of all messages from a user.
+        Format: deleteall:msg_id1:msg_id2:...
+        """
+        msg_ids = cmd.args
+        for msg_id in msg_ids:
+            self._delete_history(msg_id)
+        self.call_event("deleteall", msg_ids)
 
     async def handle_ratelimited(self, cmd: Command):
         args = cmd.args
@@ -1278,9 +1324,6 @@ class Room(WebsocketConnection, EventHandler):
 
     async def handle_modactions(self, cmd: Command):
         self.call_event("modactions")
-
-    async def handle_gotmore(self, cmd: Command):
-        self.call_event("gotmore")
 
     async def handle_mustlogin(self, cmd: Command):
         self.call_event("mustlogin")

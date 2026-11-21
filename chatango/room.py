@@ -7,7 +7,7 @@ import logging
 import urllib.parse as urlreq
 
 from collections import deque, namedtuple
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from attr import dataclass
 
 from .utils import (
@@ -19,12 +19,20 @@ from .message import (
     Message,
     MessageFlags,
     RoomMessage,
-    _process,
     message_cut,
     Command,
     MessageHistory,
 )
-from .user import RegisteredUser, User, ModeratorFlags, AdminFlags, UserManager, Session
+from .user import (
+    User,
+    ModeratorFlags,
+    AdminFlags,
+    UserManager,
+    Session,
+    SessionState,
+    AuthenticatedSession,
+    SessionStore,
+)
 from .resources import RoomProfile, fetch_resources
 from .exceptions import AlreadyConnectedError, InvalidRoomNameError
 from .handler import EventHandler
@@ -113,6 +121,8 @@ class Room(WebsocketConnection, EventHandler):
         self.reconnect = False
         self.silent = False
         self.message_flags = 0
+        self._history = MessageHistory(maxlen=3000)
+        self._usersessions = SessionStore()
         self._reset_state(name)
 
     def _reset_state(self, name: str):
@@ -120,7 +130,7 @@ class Room(WebsocketConnection, EventHandler):
         self._name = name
         self._server = get_server(name)
         self._owner: Optional[User] = None
-        self._session: Optional[Session] = None
+        self._session: Optional[AuthenticatedSession] = None
         self._flags: Optional[RoomFlags] = None
         self._version: Optional[int] = None
         self._profile: Optional[RoomProfile] = None
@@ -129,8 +139,6 @@ class Room(WebsocketConnection, EventHandler):
         self._rate_limit: Optional[int] = None
         self._mqueue = dict()
         self._uqueue = dict()
-        self._history = MessageHistory(maxlen=3000)
-        self._userdict = dict()
         self._usercount: Optional[int] = None
         self._anoncount: Optional[int] = None
         self._mods = dict()
@@ -164,7 +172,7 @@ class Room(WebsocketConnection, EventHandler):
             raise AttributeError("Owner not available, room not connected")
 
     @property
-    def session(self) -> Session:
+    def session(self) -> AuthenticatedSession:
         if self._session is not None:
             return self._session
         else:
@@ -270,34 +278,29 @@ class Room(WebsocketConnection, EventHandler):
 
     @property
     def userlist(self):
-        if self._anoncount is not None:
-            return [s.user for s in self._userdict.values()]
-        else:
-            raise AttributeError(
-                "User list not available, first send the gparticipants command"
-            )
+        return [s.user for s in self._usersessions.active_sessions()]
 
     @property
     def usercount(self):
         if self._usercount is not None:
             return self._usercount
-        elif self._anoncount is not None:
-            return self._anoncount + len(
-                [u for u in self.userlist if isinstance(u, RegisteredUser)]
-            )
-        else:
-            raise AttributeError(
-                "User list not available, first send the gparticipants command"
-            )
+        return len(self.userlist)
 
     @property
     def anoncount(self):
         if self._anoncount is not None:
             return self._anoncount
-        else:
-            raise AttributeError(
-                "User list not available, first send the gparticipants command"
-            )
+        return sum(1 for s in self._usersessions.active_sessions() if s.user.isanon)
+
+    @property
+    def usersessions(self) -> SessionStore:
+        """Returns the session store keyed by shortened cookie."""
+        return self._usersessions
+
+    @property
+    def usersessionlist(self) -> List[Session]:
+        """Returns the list of currently-online user sessions."""
+        return self._usersessions.active_sessions()
 
     async def _connect_server(self):
         """
@@ -685,6 +688,87 @@ class Room(WebsocketConnection, EventHandler):
                 name_color="000000", font_color="000000", font_size=11, font_face=1
             )
 
+    def _resolve_participant_user(self, name, alias, cookie, ts_short) -> User:
+        """Resolve a participant's user from the name/alias/cookie fields."""
+        if name:
+            return UserManager.get_user(name=name)
+        elif alias:
+            return UserManager.get_user(name=alias, aid=cookie, ts_short=ts_short)
+        return UserManager.get_user(aid=cookie, ts_short=ts_short)
+
+    def _resolve_message_user(self, name, tname, aid, body) -> User:
+        """Resolve a message sender from the name/tname/aid fields and body tag."""
+        if name:
+            return UserManager.get_user(name=name)
+        # Anonymous or Temporary User: extract display number (<nNNNN/> tag)
+        n_match = re.search(r"<n(\d{4})/?\s*>", body)
+        ts_short = n_match.group(1) if n_match else "3452"
+        return UserManager.get_user(name=tname, aid=aid, ts_short=ts_short)
+
+    async def _process_message(self, args, is_history: bool = False) -> RoomMessage:
+        """
+        Parses an incoming group message into a RoomMessage and creates or
+        updates the matching user session.
+
+        Historical and live messages both contribute session data. A message
+        within the freshness window marks the session ONLINE_MSG; ordering
+        follows the message timestamp, so late-arrived old messages stay old.
+
+        Format: CMD:TS:SID:TNAME:COOKIE_SHORT:COOKIE_ENC:MSGID:IP:FLAGS:RESERVED:TEXT
+        """
+        server_time = float(args[0])
+        _time = server_time - self.session.correction_time
+        name, tname, aid, encoded_cookie, msgid, ip, flags = args[1:8]
+        body = ":".join(args[9:])
+        user = self._resolve_message_user(name, tname, aid, body)
+
+        session = self._usersessions.find(aid, user, ip, encoded_cookie)
+        if session is None:
+            # Fresh message evidence (including recent history) means likely online.
+            fresh = time.time() - _time <= self._usersessions.message_window
+            session = Session(
+                user=user,
+                room=self,
+                short_cookie=aid,
+                encoded_cookie=encoded_cookie or None,
+                ip=ip or None,
+            )
+            user.add_session(session)
+            self._usersessions.add(
+                session,
+                state=SessionState.ONLINE_MSG if fresh else SessionState.UNKNOWN,
+                seen_at=_time,
+                supersede=not is_history,
+            )
+        else:
+            if not session.ip and ip:
+                session.ip = ip
+            if not session.encoded_cookie and encoded_cookie:
+                session.encoded_cookie = encoded_cookie
+            if is_history:
+                self._usersessions.touch(session, _time)  # backfill only stamps
+            else:
+                self._usersessions.promote(session, _time)  # live: ONLINE_MSG + siblings
+
+        msg = RoomMessage(session, msgid)
+        msg.time = float(_time)
+        msg.raw = body
+        msg.body = Message.clean_body_text(body)
+
+        msg.flags = MessageFlags(int(flags))
+        ispremium = MessageFlags.PREMIUM in msg.flags
+
+        if msg.user._ispremium != ispremium:
+            # Only call event if we knew the status before and it's not a historical message
+            if msg.user._ispremium is not None and _time > time.time() - 5:
+                self.call_event("premium_change", msg.user, ispremium)
+            msg.user.ispremium = ispremium
+
+        # Room activity ages stale message-active sessions.
+        self._usersessions.sweep(time.time())
+
+        return msg
+
     #
     # Received Command Handlers
     #
@@ -728,7 +812,7 @@ class Room(WebsocketConnection, EventHandler):
 
         # 2. Update Room and Session State
         self._owner = UserManager.get_user(name=owner_name)
-        self._session = Session(
+        self._session = AuthenticatedSession(
             room=self,
             user=user,
             auth_token=auth_token,
@@ -736,6 +820,7 @@ class Room(WebsocketConnection, EventHandler):
             ts_short=ts_short,
             ip=ip,
             conn_time=ts_id,
+            state=SessionState.ONLINE,
         )
         self._session.correction_time = int(float(ts_id) - time.time())
         self._flags = RoomFlags(int(flags_str))
@@ -894,7 +979,7 @@ class Room(WebsocketConnection, EventHandler):
         Processes historical messages sent by the server during initialization.
         Format: i:TS:SID:TNAME:COOKIE_SHORT:COOKIE_ENC:MSGID:IP:FLAGS:RESERVED:TEXT
         """
-        msg = await _process(self, cmd.args)
+        msg = await self._process_message(cmd.args, is_history=True)
         self._history.appendleft(msg.id, msg)
         self.call_event("message_history", msg)
 
@@ -904,7 +989,7 @@ class Room(WebsocketConnection, EventHandler):
         Format: b:TS:SID:TNAME:COOKIE_SHORT:COOKIE_ENC:MSGID:IP:FLAGS:RESERVED:TEXT
         """
         args = cmd.args
-        msg = await _process(self, args)
+        msg = await self._process_message(args)
         if args[5] in self._uqueue:
             msg.id = self._uqueue.pop(args[5])
             self._history.append(msg.id, msg)
@@ -934,50 +1019,61 @@ class Room(WebsocketConnection, EventHandler):
         Format: gparticipants:numAnons:SSID:TIME:COOKIE:NAME:ALIAS:IP;...
         """
         args = cmd.args
+        now = time.time()
         self._anoncount = int(args[0])
-        self._userdict = dict()
+        present = set()
 
-        # Only anons in chat
-        if len(args) == 1:
-            self.call_event("participants")
-            return
+        if len(args) > 1:
+            for record in ":".join(args[1:]).split(";"):
+                data = record.split(":")
+                ssid, contime, cookie = data[:3]
+                name = data[3] if data[3] != "None" else None
+                alias = data[4] if data[4] != "None" else None
+                ip = data[5] or None
+                ts_short = contime.split(".")[0][-4:].zfill(4)
 
-        raw_list = ":".join(args[1:])
-        for record in raw_list.split(";"):
-            data = record.split(":")
+                existing = self._usersessions.get(cookie)
+                if existing is not None and not existing.user.isanon:
+                    # Known registered session: reconcile liveness, fill blanks.
+                    self._usersessions.activate(existing)
+                    if not existing.ssid:
+                        existing.ssid = ssid
+                    if not existing.conn_time:
+                        existing.conn_time = contime
+                    if not existing.ts_short:
+                        existing.ts_short = ts_short
+                else:
+                    user = self._resolve_participant_user(
+                        name, alias, cookie, ts_short
+                    )
+                    session = Session(
+                        user=user,
+                        room=self,
+                        ssid=ssid,
+                        short_cookie=cookie,
+                        ip=ip,
+                        conn_time=contime,
+                        ts_short=ts_short,
+                    )
+                    user.add_session(session)
+                    self._usersessions.add(
+                        session, state=SessionState.ONLINE, supersede=True
+                    )
 
-            ssid = data[0]
-            contime = data[1]
-            cookie = data[2]
-            name = data[3] if data[3] != "None" else None
-            alias = data[4] if data[4] != "None" else None
-            ip = data[5] or None
+                present.add(cookie)
 
-            ts_short = contime.split(".")[0][-4:].zfill(4)
+        # Registered sessions absent from the snapshot have left; anons are skipped.
+        for cookie in list(self._usersessions.keys()):
+            session = self._usersessions.get(cookie)
+            if (
+                session is not None
+                and session.state.is_online
+                and not session.user.isanon
+                and cookie not in present
+            ):
+                self._usersessions.deactivate(cookie, disconnected_at=now)
 
-            if name:
-                user = UserManager.get_user(name=name)
-            elif alias:
-                user = UserManager.get_user(name=alias, aid=cookie, ts_short=ts_short)
-            else:
-                user = UserManager.get_user(aid=cookie, ts_short=ts_short)
-
-            session = Session(
-                user=user,
-                room=self,
-                ssid=ssid,
-                short_cookie=cookie,
-                ip=ip,
-                conn_time=contime,
-            )
-            user.add_session(session)
-            self._userdict[ssid] = session
-
-            # If this is our own SSID, update our main session
-            # Note: We still don't have a foolproof way to know which SSID is ours
-            # but if IP and name match, it's a good guess.
-            # For now, just ensure we don't overwrite auth_token.
-
+        self._usersessions.sweep(now)
         self.call_event("participants")
 
     async def handle_participant(self, cmd: Command):
@@ -993,56 +1089,95 @@ class Room(WebsocketConnection, EventHandler):
         cookie = args[2]
         name = args[3] if args[3] != "None" else None
         alias = args[4] if args[4] != "None" else None
-        ip = args[5] or None
         contime = args[6]
 
         ts_short = contime.split(".")[0][-4:].zfill(4)
-
-        if name:
-            user = UserManager.get_user(name=name)
-        elif alias:
-            user = UserManager.get_user(name=alias, aid=cookie, ts_short=ts_short)
-        else:
-            user = UserManager.get_user(aid=cookie, ts_short=ts_short)
-
-        session = Session(
-            user=user,
-            room=self,
-            ssid=ssid,
-            short_cookie=cookie,
-            ip=ip,
-            conn_time=contime,
-        )
-        user.add_session(session)
-        self._userdict[ssid] = session
+        now = time.time()
 
         if status == "0":  # Leave
-            self._userdict.pop(ssid)
+            session = self._usersessions.deactivate(cookie, disconnected_at=now)
+            if session is None:
+                # No tracked record: build a transient session for the event.
+                user = self._resolve_participant_user(name, alias, cookie, ts_short)
+                session = Session(
+                    user=user,
+                    room=self,
+                    ssid=ssid,
+                    short_cookie=cookie,
+                    conn_time=contime,
+                    ts_short=ts_short,
+                )
+                session.state = SessionState.OFFLINE
+                session.disconnect_time = now
 
-            if user.isanon:
-                if self._anoncount:
+            if session.user.isanon:
+                if self._anoncount is not None:
                     self._anoncount -= 1
 
-            self.call_event("leave", user)
+            self.call_event("leave", session)
 
         elif status == "1":  # Join
-            if user.isanon:
-                if self._anoncount:
+            user = self._resolve_participant_user(name, alias, cookie, ts_short)
+            existing = self._usersessions.get(cookie)
+            if (
+                existing is not None
+                and existing.user.isanon == user.isanon
+                and (existing.ssid is None or existing.ssid == ssid)
+            ):
+                session = existing
+                session.ssid = ssid
+                if not session.conn_time:
+                    session.conn_time = contime
+                if not session.ts_short:
+                    session.ts_short = ts_short
+                self._usersessions.activate(session)
+            else:
+                session = Session(
+                    user=user,
+                    room=self,
+                    ssid=ssid,
+                    short_cookie=cookie,
+                    conn_time=contime,
+                    ts_short=ts_short,
+                )
+                user.add_session(session)
+                self._usersessions.add(
+                    session, state=SessionState.ONLINE, supersede=True
+                )
+
+            if session.user.isanon:
+                if self._anoncount is not None:
                     self._anoncount += 1
 
-            self.call_event("join", user)
+            self.call_event("join", session)
 
         elif status == "2":  # Auth Change (Login/Logout)
+            user = self._resolve_participant_user(name, alias, cookie, ts_short)
+            session = Session(
+                user=user,
+                room=self,
+                ssid=ssid,
+                short_cookie=cookie,
+                conn_time=contime,
+                ts_short=ts_short,
+            )
+            user.add_session(session)
+            self._usersessions.add(
+                session, state=SessionState.ONLINE, supersede=True
+            )
+
             if name:
-                if self._anoncount:
+                if self._anoncount is not None:
                     self._anoncount -= 1
 
             if name or alias:
-                self.call_event("login", user)
+                self.call_event("login", session)
             else:
-                if self._anoncount:
+                if self._anoncount is not None:
                     self._anoncount += 1
-                self.call_event("logout", user)
+                self.call_event("logout", session)
+
+        self._usersessions.sweep(now)
 
     async def handle_mods(self, cmd: Command):
         args = cmd.args

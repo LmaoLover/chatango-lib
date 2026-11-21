@@ -1,7 +1,7 @@
 import enum
 import time
 import weakref
-from typing import Any, Optional, Type, Union, TYPE_CHECKING
+from typing import Any, Optional, List, Type, Union, TYPE_CHECKING
 from collections import deque
 
 from .utils import public_attributes
@@ -190,9 +190,17 @@ class User:
         return isinstance(self, TemporaryUser)
 
     def add_session(self, session):
+        """Register a session (weakly referenced) for this user."""
         self._sessions.add(session)
 
     def get_sessions(self, room=None):
+        """Return the user's currently-alive sessions.
+
+        Sessions are weakly referenced, so entries vanish once they are no
+        longer held by a room's session store or a message. The result may
+        include offline/superseded sessions that are still referenced; filter
+        on ``session.state`` to obtain only currently-online sessions.
+        """
         if room:
             return {s for s in self._sessions if s.room == room}
         else:
@@ -266,7 +274,7 @@ class RegisteredUser(User):
         if bg_success or style_success:
             bg_toggle = "1" if self.styles.use_background else "0"
             for session in self._sessions:
-                if session.room:
+                if session.room and session.state is not SessionState.OFFLINE:
                     await session.room.send_command("msgbg", bg_toggle)
                     await session.room.send_command("miu")
 
@@ -322,51 +330,295 @@ class TemporaryUser(AnonymousUser):
         return self.showname.lower()
 
 
+class SessionState(enum.Enum):
+    """How much is known about a session's connection.
+
+    ONLINE: participant data confirmed the connection; nothing revoked it.
+    ONLINE_MSG: a recent message; likely present but not confirmed.
+    UNKNOWN: old message evidence only; the connection may or may not be present.
+    OFFLINE: known gone (leave, absent from snapshot, or superseded).
+    """
+
+    ONLINE = enum.auto()
+    ONLINE_MSG = enum.auto()
+    UNKNOWN = enum.auto()
+    OFFLINE = enum.auto()
+
+    @property
+    def is_online(self) -> bool:
+        """ONLINE or ONLINE_MSG — the states calling code treats as online."""
+        return self in (SessionState.ONLINE, SessionState.ONLINE_MSG)
+
+
 class Session:
-    """Represents an active connection session to a room."""
+    """A room session; last_seen is the latest message timestamp in room time."""
+
+    def __init__(
+        self,
+        user: User,
+        room: Union["Room", "PM"],
+        ssid: Optional[str] = None,
+        short_cookie: Optional[str] = None,
+        encoded_cookie: Optional[str] = None,
+        ts_short: Optional[str] = None,
+        ip: Optional[str] = None,
+        conn_time: Optional[str] = None,
+        state: SessionState = SessionState.UNKNOWN,
+    ):
+        self.user = user
+        self.room = room
+        self.ssid = ssid
+        self.short_cookie = short_cookie
+        self.encoded_cookie = encoded_cookie
+        self.ts_short = ts_short
+        self.ip = ip
+        self.conn_time = conn_time
+        self.state = state
+        self.last_seen = 0.0
+        self.disconnect_time: Optional[float] = None
+
+    def __repr__(self):
+        name = self.user.showname if self.user else "Unknown"
+        return "<Session {} {}{}{}ip:{} state:{} last_seen:{:.1f}>".format(
+            name,
+            f"{self.short_cookie} " if self.short_cookie else "",
+            f"ssid:{self.ssid} " if self.ssid else "",
+            f"ts_short:{self.ts_short} " if self.ts_short else "",
+            self.ip,
+            self.state.name,
+            self.last_seen,
+        )
+
+
+class AuthenticatedSession(Session):
+    """Our own authenticated connection, enriched by the auth handshake."""
 
     def __init__(
         self,
         user: User,
         room: Union["Room", "PM"],
         auth_token: Optional[str] = None,
-        ssid: Optional[str] = None,
-        short_cookie: Optional[str] = None,
-        encoded_cookie: Optional[str] = None,
         ts_id: Optional[str] = None,
-        ts_short: Optional[str] = None,
-        ip: Optional[str] = None,
-        conn_time: Optional[str] = None,
         correction_time: int = 0,
         badge: int = 0,
+        **kwargs,
     ):
-        self.user = user
-        self.room = room
+        super().__init__(user, room, **kwargs)
         self.auth_token = auth_token
-        self.ssid = ssid
-        self.short_cookie = short_cookie
-        self.encoded_cookie = encoded_cookie
         self.ts_id = ts_id
-        self.ts_short = ts_short
-        self.ip = ip
-        self.conn_time = conn_time
         self.correction_time = correction_time
         self.badge = badge
 
-    def __repr__(self):
-        name = self.user.showname if self.user else "Unknown"
-        return "<Session user:{} {}{}{}{}ip:{}>".format(
-            name,
-            f"auth_token:{self.auth_token} " if self.auth_token else "",
-            f"ssid:{self.ssid} " if self.ssid else "",
-            f"cookie:{self.short_cookie} " if self.short_cookie else "",
-            (
-                f"ts_id:{self.ts_id} "
-                if self.ts_id
-                else (f"ts_short:{self.ts_short} " if self.ts_short else "")
-            ),
-            self.ip,
+
+class SessionStore(dict):
+    """Stores sessions keyed by shortened cookie.
+
+    A cookie can accumulate multiple sessions over time (identity changes,
+    reconnects, IP changes). The stored value per key is the full chronological
+    history; the default lookup surfaces only the most recent (active) session.
+    """
+
+    def __init__(
+        self,
+        sweep_trigger: int = 3000,
+        disconnect_grace: float = 86400.0,
+        max_silence: float = 2592000.0,
+        message_window: float = 14400.0,
+    ):
+        super().__init__()
+        self.sweep_trigger = sweep_trigger
+        self.disconnect_grace = disconnect_grace
+        self.max_silence = max_silence
+        self.message_window = message_window
+
+    def __getitem__(self, cookie: str) -> Session:
+        session = self.get(cookie)
+        if session is None:
+            raise KeyError(cookie)
+        return session
+
+    def get(self, cookie: str, default=None) -> Optional[Session]:
+        history = dict.get(self, cookie)
+        if not history:
+            return default
+        return max(
+            history,
+            key=lambda session: (session.state.is_online, session.last_seen),
         )
+
+    def __setitem__(self, cookie: str, session: Session) -> None:
+        if session.short_cookie != cookie:
+            raise ValueError(
+                f"Session cookie {session.short_cookie!r} does not match key {cookie!r}"
+            )
+        self.add(session)
+
+    def __iter__(self):
+        for cookie in dict.keys(self):
+            session = self.get(cookie)
+            if session is not None:
+                yield session
+
+    def __len__(self) -> int:
+        return dict.__len__(self)
+
+    def add(
+        self,
+        session: Session,
+        *,
+        state: Optional[SessionState] = None,
+        seen_at: Optional[float] = None,
+        supersede: bool = False,
+    ) -> None:
+        """Store a session; supersede marks the cookie's other sessions OFFLINE."""
+        cookie = session.short_cookie
+        history = dict.get(self, cookie)
+        if history is None:
+            history = []
+            dict.__setitem__(self, cookie, history)
+
+        if session not in history:
+            history.append(session)
+        if seen_at is not None:
+            session.last_seen = max(session.last_seen, seen_at)
+        if state is not None:
+            session.state = state
+
+        if supersede:
+            for candidate in history:
+                if candidate is not session:
+                    candidate.state = SessionState.OFFLINE
+            session.disconnect_time = None
+        history.sort(key=lambda item: item.last_seen)
+
+    def activate(self, session: Session, seen_at: Optional[float] = None) -> None:
+        """Make this session the cookie's ONLINE one (its siblings go OFFLINE)."""
+        history = dict.get(self, session.short_cookie)
+        if history is None or session not in history:
+            raise ValueError("Cannot activate a session that is not in the store")
+
+        if seen_at is not None:
+            session.last_seen = max(session.last_seen, seen_at)
+        for candidate in history:
+            candidate.state = (
+                SessionState.ONLINE if candidate is session else SessionState.OFFLINE
+            )
+        session.disconnect_time = None
+        history.sort(key=lambda item: item.last_seen)
+
+    def find(
+        self,
+        cookie: str,
+        user: User,
+        ip: Optional[str] = None,
+        encoded_cookie: Optional[str] = None,
+    ) -> Optional[Session]:
+        """Find the newest session matching identity and available message fields."""
+        history = dict.get(self, cookie, [])
+        matches = []
+        for session in history:
+            if session.user is not user:
+                continue
+            if session.ip and ip and session.ip != ip:
+                continue
+            if (
+                session.encoded_cookie
+                and encoded_cookie
+                and session.encoded_cookie != encoded_cookie
+            ):
+                continue
+            matches.append(session)
+
+        def match_rank(session):
+            ip_match = bool(ip and session.ip == ip)
+            cookie_match = bool(encoded_cookie and session.encoded_cookie == encoded_cookie)
+            return ip_match, cookie_match, session.last_seen
+
+        return max(matches, key=match_rank, default=None)
+
+    def touch(self, session: Session, seen_at: float) -> None:
+        """Record an event timestamp without changing the session's state."""
+        history = dict.get(self, session.short_cookie)
+        if history is None or session not in history:
+            raise ValueError("Cannot update a session that is not in the store")
+        session.last_seen = max(session.last_seen, seen_at)
+        history.sort(key=lambda item: item.last_seen)
+
+    def promote(self, session: Session, seen_at: float) -> None:
+        """Live message: make this the cookie's ONLINE_MSG session; siblings go OFFLINE."""
+        history = dict.get(self, session.short_cookie)
+        if history is None or session not in history:
+            raise ValueError("Cannot update a session that is not in the store")
+        if session.state is not SessionState.ONLINE:
+            session.state = SessionState.ONLINE_MSG
+        for candidate in history:
+            if candidate is not session:
+                candidate.state = SessionState.OFFLINE
+        session.disconnect_time = None
+        session.last_seen = max(session.last_seen, seen_at)
+        history.sort(key=lambda item: item.last_seen)
+
+    def deactivate(
+        self,
+        cookie: str,
+        disconnected_at: Optional[float] = None,
+    ) -> Optional[Session]:
+        """Mark the cookie's current session offline; retains its record."""
+        session = self.get(cookie)
+        if session is None:
+            return None
+        session.state = SessionState.OFFLINE
+        session.disconnect_time = (
+            time.time() if disconnected_at is None else disconnected_at
+        )
+        dict.__getitem__(self, cookie).sort(key=lambda item: item.last_seen)
+        return session
+
+    def sessions_for(self, cookie: str) -> List[Session]:
+        """All sessions for a cookie, oldest first."""
+        return list(dict.get(self, cookie, []))
+
+    def active_sessions(self) -> List[Session]:
+        """Return every retained session currently treated as online."""
+        return [s for s in self if s.state.is_online]
+
+    def all_sessions(self) -> List[Session]:
+        """Every retained session, active and inactive."""
+        result = []
+        for history in dict.values(self):
+            result.extend(history)
+        return result
+
+    def sweep(self, now: float) -> None:
+        """Age message-active sessions, then evict stale records above the trigger."""
+        # A message-active session that has gone quiet is demoted, not dropped.
+        for history in dict.values(self):
+            for session in history:
+                if (
+                    session.state is SessionState.ONLINE_MSG
+                    and now - session.last_seen > self.message_window
+                ):
+                    session.state = SessionState.UNKNOWN
+        total = sum(len(history) for history in dict.values(self))
+        if total <= self.sweep_trigger:
+            return
+        for cookie in list(dict.keys(self)):
+            history = dict.__getitem__(self, cookie)
+            kept = [s for s in history if not self._evictable(s, now)]
+            if kept:
+                kept.sort(key=lambda item: item.last_seen)
+                dict.__setitem__(self, cookie, kept)
+            else:
+                dict.__delitem__(self, cookie)
+
+    def _evictable(self, session: Session, now: float) -> bool:
+        if session.state.is_online:
+            # ONLINE and ONLINE_MSG sessions are never evicted for silence.
+            return False
+        if session.state is SessionState.UNKNOWN:
+            # Message evidence only: keep until it has been silent a long time.
+            return now - session.last_seen > self.max_silence
+        return now - (session.disconnect_time or session.last_seen) > self.disconnect_grace
 
 
 class UserManager:

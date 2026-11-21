@@ -7,8 +7,8 @@ from .utils import get_token, gen_uid, public_attributes
 from .exceptions import AlreadyConnectedError
 from .handler import CommandHandler, EventHandler
 from .connection import WebsocketConnection
-from .user import User, Friend, UserManager, Session
-from .message import _process_pm, message_cut, Command
+from .user import User, Friend, UserManager, AuthenticatedSession, SessionState
+from .message import Message, PMMessage, message_cut, Command
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,9 @@ class PM(WebsocketConnection, EventHandler):
         EventHandler.__init__(self)
         self.server = "c1.chatango.com"
         self.port = 8081
-        self.session: Session = Session(room=self, user=UserManager.get_user())
+        self.session: AuthenticatedSession = AuthenticatedSession(
+            room=self, user=UserManager.get_user(), state=SessionState.ONLINE
+        )
         self.reconnect = False
         self.__token = None
 
@@ -146,6 +148,32 @@ class PM(WebsocketConnection, EventHandler):
                 msg_payload = f'{self.user.styles.get_name_tag()}<m v="1"><g xs0="0">{self.user.styles.format_message(msg, is_pm=True)}</g></m>'
                 await self.send_command("msg", target.lower(), msg_payload)
 
+    async def _process_message(self, args):
+        """
+        Process incoming private message.
+        Format: msg:chat_id:uid_cookie:?:ts:flags:content
+        """
+        chat_id = args[0]
+        uid_cookie = args[1]
+        # args[2] is ?
+        timestamp = float(args[3]) - self.session.correction_time
+        flags = int(args[4])
+        body = ":".join(args[5:])
+
+        if chat_id.startswith("*"):
+            # Anon
+            sender = chat_id
+        else:
+            # Registered
+            sender = chat_id
+        user = UserManager.get_user(name=sender)
+
+        msg = PMMessage(user, self)
+        msg.time = timestamp
+        msg.raw = body
+        msg.body = Message.clean_body_text(body)
+        return msg
+
     # --- Command Handlers ---
 
     async def handle_OK(self, cmd: Command):
@@ -187,14 +215,14 @@ class PM(WebsocketConnection, EventHandler):
     async def handle_msg(self, cmd: Command):
         args = cmd.args
         # msg:msg_id:sender_handle:timestamp:message_content
-        msg = await _process_pm(self, args)
+        msg = await self._process_message(args)
         self._add_to_history(msg)
         self.call_event("msg", msg)
 
     async def handle_msgoff(self, cmd: Command):
         args = cmd.args
         # msgoff:msg_id:sender_handle:timestamp:message_content
-        msg = await _process_pm(self, args)
+        msg = await self._process_message(args)
         msg.msgoff = True
         self._add_to_history(msg)
         self.call_event("msgoff", msg)

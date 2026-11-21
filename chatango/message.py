@@ -1,17 +1,12 @@
 import re
-import time
 import enum
 import html
 from collections import OrderedDict
-from typing import Union, Any, TYPE_CHECKING
+from typing import Any
 
 from .utils import public_attributes
-from .user import User, UserManager
+from .user import User, Session
 from .resources import Styles
-
-if TYPE_CHECKING:
-    from .pm import PM
-    from .room import Room
 
 
 class Command:
@@ -67,13 +62,19 @@ Fonts = {
 
 
 class Message:
-    def __init__(self, user, room):
-        self.user: User = user
-        self.room: Union[Room, PM] = room
+    def __init__(self):
         self.time = 0.0
         self.body = str()
         self.raw = str()
         self._styles = None
+
+    @property
+    def user(self):
+        raise NotImplementedError
+
+    @property
+    def room(self):
+        raise NotImplementedError
 
     @property
     def styles(self):
@@ -105,86 +106,52 @@ class Message:
 
 class PMMessage(Message):
     def __init__(self, user, room):
-        super().__init__(user, room)
+        super().__init__()
+        self._user = user
+        self._room = room
         self.id = None
         self.msgoff = False
         self.flags = str(0)
 
+    @property
+    def user(self):
+        return self._user
+
+    @property
+    def room(self):
+        return self._room
+
 
 class RoomMessage(Message):
-    def __init__(self, user, room, id):
-        super().__init__(user, room)
+    def __init__(self, session: Session, id):
+        super().__init__()
+        self.session = session
         self.id: str = id
-        self.short_cookie = str()
-        self.ip = str()
-        self.encoded_cookie = str()
         self.flags = 0
         self.deleted = False
 
+    @property
+    def user(self) -> User:
+        return self.session.user
+
+    @property
+    def room(self):
+        return self.session.room
+
+    @property
+    def ip(self):
+        return self.session.ip
+
+    @property
+    def short_cookie(self):
+        return self.session.short_cookie
+
+    @property
+    def encoded_cookie(self):
+        return self.session.encoded_cookie
+
     def __repr__(self):
         return f'<RoomMessage {self.room.name} {self.user.name} {"deleted " if self.deleted else ""}"{self.body}">'
-
-
-async def _process(room, args):
-    """Process message"""
-    _time = float(args[0]) - room.session.correction_time
-    name, tname, aid, encoded_cookie, msgid, ip, flags = args[1:8]
-    body = ":".join(args[9:])
-
-    if name:
-        # Registered User
-        user = UserManager.get_user(name=name)
-    else:
-        # Anonymous or Temporary User
-        # Extract Display Number (<nNNNN/> tag)
-        n_match = re.search(r"<n(\d{4})/?\s*>", body)
-        ts_short = n_match.group(1) if n_match else "3452"
-        user = UserManager.get_user(name=tname, aid=aid, ts_short=ts_short)
-
-    msg = RoomMessage(user, room, msgid)
-    msg.time = float(_time)
-    msg.short_cookie = str(aid)
-    msg.encoded_cookie = encoded_cookie
-    msg.ip = ip
-    msg.raw = body
-    msg.body = Message.clean_body_text(body)
-
-    msg.flags = MessageFlags(int(flags))
-    ispremium = MessageFlags.PREMIUM in msg.flags
-
-    if msg.user._ispremium != ispremium:
-        # Only call event if we knew the status before and it's not a historical message
-        if msg.user._ispremium is not None and _time > time.time() - 5:
-            room.call_event("premium_change", msg.user, ispremium)
-        msg.user.ispremium = ispremium
-    return msg
-
-
-async def _process_pm(pm, args):
-    """
-    Process incoming private message.
-    Format: msg:chat_id:uid_cookie:?:ts:flags:content
-    """
-    chat_id = args[0]
-    uid_cookie = args[1]
-    # args[2] is ?
-    timestamp = float(args[3]) - pm.session.correction_time
-    flags = int(args[4])
-    body = ":".join(args[5:])
-
-    if chat_id.startswith("*"):
-        # Anon
-        sender = chat_id
-    else:
-        # Registered
-        sender = chat_id
-    user = UserManager.get_user(name=sender)
-
-    msg = PMMessage(user, pm)
-    msg.time = timestamp
-    msg.raw = body
-    msg.body = Message.clean_body_text(body)
-    return msg
 
 
 def message_cut(message, lenth):

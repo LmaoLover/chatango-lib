@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.10"
 
 [[package]]
@@ -222,7 +222,7 @@ wheels = [
 ]
 
 [[package]]
-name = "chatango-lib"
+name = "chatango"
 version = "1.11.0"
 source = { editable = "." }
 dependencies = [

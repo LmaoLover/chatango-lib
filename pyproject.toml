@@ -1,5 +1,5 @@
 [project]
-name = "chatango-lib"
+name = "chatango"
 version = "1.11.0"
 description = "Chatango bot library using asyncio"
 license = "GPL-3.0-or-later"

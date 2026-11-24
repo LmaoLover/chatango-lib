@@ -1,10 +1,10 @@
-# chatango-lib
+# chatango
 
 Chatango library using Python 3.10 and asyncio
 
 ### Acknowledgements
 
-Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze/chatango-lib) by authors: [neokuze](https://github.com/neokuze/chatango-lib) and [TheClonerx](https://github.com/TheClonerx)
+Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze/chatango-lib) by authors: [neokuze](https://github.com/neokuze) and [TheClonerx](https://github.com/TheClonerx)
 
 ### Requirements
 
@@ -12,18 +12,22 @@ Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze
 
 ## Installation
 
+```
+pip install chatango==1.11.0
+```
+
 ### From Source
 ```
-git clone https://github.com/LmaoLover/chatango-lib
-cd chatango-lib
+git clone https://github.com/LmaoLover/chatango
+cd chatango
 pip install .
 ```
+
+Due to heavy development and frequent API changes, pin to a specific version and refer to commit history here before updating.
 
 ## Usage
 
 The main classes you will use from the `chatango` module are `Client`, `Room`, `PM`, `Message`, and `User`.
-
-*Please Note*: the interfaces for these classes and their events are not finalized.  Please be aware of any changes when upgrading.
 
 ### Using `asyncio`
 

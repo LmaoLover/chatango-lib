@@ -1,6 +1,6 @@
 # chatango-lib
 
-Chatango library using Python 3.9 and asyncio
+Chatango library using Python 3.10 and asyncio
 
 ### Acknowledgements
 
@@ -8,7 +8,7 @@ Credit to the original project [neokuze/chatango-lib](https://github.com/neokuze
 
 ### Requirements
 
- - `python` 3.9+
+ - `python` 3.10+
 
 ## Installation
 

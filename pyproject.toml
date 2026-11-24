@@ -1,6 +1,6 @@
 [project]
 name = "chatango-lib"
-version = "1.10.2"
+version = "1.11.0"
 description = "Chatango bot library using asyncio"
 license = "GPL-3.0-or-later"
 readme = "README.md"
@@ -9,13 +9,13 @@ authors = [
     { name = "neokuze", email = "imneokuze@gmail.com" },
     { name = "TheClonerx", email = "theclonerx@outlook.com" },
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "aiohttp>=3.13.5",
+    "aiohttp>=3.14.5",
 ]
 
 [build-system]
-requires = ["uv_build>=0.11.6,<0.12"]
+requires = ["uv_build>=0.11.6,<0.14"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
